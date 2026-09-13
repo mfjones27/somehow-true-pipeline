@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-video-factory"
+version = "0.1.0"
+description = "Local-only, explicit-manifest faceless video rendering prototype"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "pydantic>=2.9,<3",
+  "Pillow>=10.4,<13",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+video-factory = "video_factory.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["video_factory*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+assets/*
+!assets/.gitkeep
+jobs/*
+!jobs/.gitkeep
+test_artifacts/
+

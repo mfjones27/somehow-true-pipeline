@@ -1,0 +1,40 @@
+{
+  "content_id": "FCT-011",
+  "title": "Dutch Land Inside Belgium Inside the Netherlands",
+  "description": "The Netherlands, inside Belgium, inside the Netherlands. Baarle's geography is real: 22 Belgian enclaves, seven nested Dutch enclaves, and one more Dutch enclave on the Belgian mainland.\n\nSome borders even run through homes.\n\nSomehow True: facts that sound made up, checked before we tell them.\n\nSources:\nBaarle-Hertog municipality: https://www.baarle-hertog.be/30-enclaves\nDeutsche Welle: https://www.dw.com/en/baarle-the-town-where-borders-run-riot/a-57631603\nVisit Baarle: https://m-en.visitbaarle.com/locaties/enclaves-5e43f39e38374665355357fe\n\nVisuals are AI-generated illustrations. Narration is synthetic. Music is original computer-generated.\n\n#Shorts #Geography #SomehowTrue",
+  "tags": ["Baarle", "geography", "enclaves", "Netherlands", "Belgium", "Somehow True", "Shorts"],
+  "script": "There's Dutch land inside Belgian land inside the Netherlands. This is Baarle, where two countries form a puzzle of thirty enclaves. Twenty-two patches of Belgium are completely surrounded by Dutch territory. Inside the two largest Belgian patches sit seven Dutch enclaves. That's the Netherlands, inside Belgium, inside the Netherlands. One more Dutch enclave lies on the Belgian mainland. Twenty-two, plus seven, plus one. Thirty enclaves. And these borders don't politely stop at the edge of a building. They run through buildings, including people's homes. Imagine living in a house where the international border is inside your home.",
+  "sources": [
+    "https://www.baarle-hertog.be/30-enclaves",
+    "https://www.dw.com/en/baarle-the-town-where-borders-run-riot/a-57631603",
+    "https://m-en.visitbaarle.com/locaties/enclaves-5e43f39e38374665355357fe"
+  ],
+  "clips_dir": "full_pilot",
+  "captions_dir": "full_pilot/captions",
+  "intro_clip": "runway-test-raw.mp4",
+  "narration_path": "video_factory/assets/pilot/narration.wav",
+  "scene_prompts": [
+    "Portrait cinematic travel-documentary shot of a fictional small Dutch-Belgian town.",
+    "Portrait cinematic shot looking down a narrow cobblestone alley.",
+    "Portrait cinematic overhead shot of a fictional old European town square.",
+    "Portrait cinematic shot of a quiet residential street in a fictional Dutch-Belgian town.",
+    "Portrait cinematic close-up of a white border line painted across cobblestones.",
+    "Portrait cinematic wide shot of a fictional European town at dusk."
+  ],
+  "scene_durations": [5, 8, 8, 8, 8, 10],
+  "brand": "SOMEHOW TRUE",
+  "output_name": "somehow-true-baarle-full.mp4",
+  "youtube_channel_id": "UC7FJMzijz0T-SIll_8SYtaw",
+  "runway_model": "gen4.5",
+  "runway_ratio": "720:1280",
+  "caption_font": "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
+  "caption_font_size": 66,
+  "caption_style": {
+    "text_color": "&H00FFFFFF",
+    "active_word_color": "&H87E2C5&",
+    "outline_color": "&H0018100D",
+    "pos_x": 485,
+    "pos_y": 1400,
+    "max_width_px": 780
+  }
+}

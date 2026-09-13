@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""FastAPI server wrapping the Somehow True video pipeline.
+
+Endpoints:
+  GET  /health          — health check for Railway
+  POST /produce         — run the full pipeline from a config JSON
+  POST /produce/daily   — pick next content, generate video, return result
+  GET  /queue           — show content queue status
+  GET  /jobs/{job_id}    — check background job status
+
+Environment variables:
+  RUNWAY_API_KEY    — Runway API key for video generation
+  YOUTUBE_API_KEY   — YouTube Data API key (for uploads)
+  GOOGLE_DRIVE_KEY  — Google Drive API key (for uploads)
+  NOTION_API_KEY    — Notion API key (for tracking)
+  OPENAI_API_KEY    — (optional) for TTS narration via OpenAI
+  PORT              — server port (set by Railway, defaults to 8000)
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Optional
+
+app = FastAPI(
+    title="Somehow True Pipeline",
+    description="Automated video production pipeline for Somehow True YouTube channel",
+    version="1.0.0",
+)
+
+ROOT = Path(__file__).resolve().parent
+JOBS: dict[str, dict] = {}
+
+
+class ProduceRequest(BaseModel):
+    content_id: Optional[str] = None
+    config_path: Optional[str] = None
+    narration_path: Optional[str] = None
+    skip_runway: bool = False
+    skip_captions: bool = False
+
+
+class DailyRequest(BaseModel):
+    narration_path: Optional[str] = None
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint for Railway."""
+    return {"status": "ok", "service": "somehow-true-pipeline", "version": "1.0.0"}
+
+
+@app.get("/queue")
+async def queue():
+    """Show content queue status."""
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "daily_pipeline.py"), "--list"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    return JSONResponse({
+        "queue": result.stdout,
+        "exit_code": result.returncode,
+    })
+
+
+@app.post("/produce")
+async def produce(req: ProduceRequest, background_tasks: BackgroundTasks):
+    """Run the full pipeline from a config or content ID."""
+    job_id = str(uuid.uuid4())[:8]
+    JOBS[job_id] = {
+        "id": job_id, "status": "running", "started_at": time.time(),
+        "content_id": req.content_id, "result": None, "error": None,
+    }
+
+    async def run_pipeline():
+        try:
+            cmd = [sys.executable, str(ROOT / "produce_video.py")]
+            if req.config_path:
+                cmd += ["--config", req.config_path]
+            elif req.content_id:
+                # Generate config from content ID via daily_pipeline.py
+                config_dir = ROOT / "pipeline_output" / req.content_id
+                config_path = config_dir / "config.json"
+                if not config_path.exists():
+                    daily_cmd = [sys.executable, str(ROOT / "daily_pipeline.py")]
+                    if req.narration_path:
+                        daily_cmd += ["--narration", req.narration_path]
+                    if req.content_id:
+                        daily_cmd += ["--content", req.content_id]
+                    subprocess.run(daily_cmd, cwd=str(ROOT), check=True)
+                cmd += ["--config", str(config_path)]
+            else:
+                cmd += ["--config", str(ROOT / "config.example.json")]
+
+            if req.skip_runway:
+                cmd.append("--skip-runway")
+            if req.skip_captions:
+                cmd.append("--skip-captions")
+
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
+            if result.returncode == 0:
+                JOBS[job_id]["status"] = "completed"
+                JOBS[job_id]["result"] = result.stdout[-2000:]
+            else:
+                JOBS[job_id]["status"] = "failed"
+                JOBS[job_id]["error"] = result.stderr[-2000:]
+        except Exception as e:
+            JOBS[job_id]["status"] = "failed"
+            JOBS[job_id]["error"] = str(e)
+
+    background_tasks.add_task(run_pipeline)
+    return {"job_id": job_id, "status": "started", "message": "Pipeline running in background"}
+
+
+@app.post("/produce/daily")
+async def produce_daily(req: DailyRequest, background_tasks: BackgroundTasks):
+    """Pick next content from the queue and produce a video."""
+    job_id = str(uuid.uuid4())[:8]
+    JOBS[job_id] = {
+        "id": job_id, "status": "running", "started_at": time.time(),
+        "result": None, "error": None,
+    }
+
+    def run_daily():
+        try:
+            cmd = [sys.executable, str(ROOT / "daily_pipeline.py")]
+            if req.narration_path:
+                cmd += ["--narration", req.narration_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(ROOT))
+            if result.returncode == 0:
+                JOBS[job_id]["status"] = "completed"
+                JOBS[job_id]["result"] = result.stdout[-2000:]
+            else:
+                JOBS[job_id]["status"] = "failed"
+                JOBS[job_id]["error"] = result.stderr[-2000:]
+        except Exception as e:
+            JOBS[job_id]["status"] = "failed"
+            JOBS[job_id]["error"] = str(e)
+
+    background_tasks.add_task(run_daily)
+    return {"job_id": job_id, "status": "started", "message": "Daily pipeline running"}
+
+
+@app.get("/jobs/{job_id}")
+async def job_status(job_id: str):
+    """Check the status of a background job."""
+    if job_id not in JOBS:
+        return JSONResponse({"error": "Job not found"}, status_code=404)
+    job = JOBS[job_id].copy()
+    if job["status"] == "running":
+        job["elapsed_seconds"] = time.time() - job["started_at"]
+    return job
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

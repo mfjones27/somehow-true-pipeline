@@ -1,0 +1,36 @@
+# Environment variables
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Model caches
+.model_cache/
+*.bin
+*.pt
+*.ckpt
+
+# Output artifacts
+pipeline_output/
+*.mp4
+*.wav
+*.png
+*.jpg
+!pipeline_output/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# Railway
+.railway/

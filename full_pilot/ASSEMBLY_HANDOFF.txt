@@ -1,0 +1,88 @@
+SOMEHOW TRUE — BAARLE / ASSEMBLY HANDOFF
+
+Prepared locally only. No paid media generation, publishing, upload, repo or
+Notion modification performed by this assembly worker.
+
+ENTRY POINT
+  python /home/user/workspace/content_factory/full_pilot/assemble.py --prepare
+  python /home/user/workspace/content_factory/full_pilot/assemble.py --check
+  python /home/user/workspace/content_factory/full_pilot/assemble.py --render --footage-approved
+
+Do not run final render until main has inspected the actual six clips.
+--footage-approved is an intentional render gate, not a claim that the user
+has approved publication. Local rendering does not publish anything.
+
+EXPECTED INPUTS
+  scene01.mp4                preferred portable intro
+  ../runway-test-raw.mp4       intro fallback; 121 frames / 5.041667 seconds
+  scene02.mp4                8 seconds
+  scene03.mp4                8 seconds
+  scene04.mp4                8 seconds
+  scene05.mp4                8 seconds
+  scene06.mp4                10 seconds
+  narration.wav              preferred portable narration
+  ../video_factory/assets/pilot/narration.wav   narration fallback
+  captions/captions.ass       1080x1920 coordinate system
+
+Nominal total: 1129 frames at 24fps = 47.041667 seconds.
+Preflight calculates the actual total from full source-frame counts.
+Narration retains all 2,243,086 original 48kHz samples (46.730958 seconds).
+Original clip audio is discarded. No atempo, setpts, speech edits, speed
+changes, frame interpolation, transitions or speech truncation.
+
+VIDEO
+Full clips concatenated with hard cuts, then Lanczos-upscaled from
+720x1280 to 1080x1920. This is NOT native 1080p footage.
+ASS captions burned after upscaling.
+Small 24px, 70%-opacity SOMEHOW TRUE brand bug at x58/y130.
+Use --no-brand to omit it. No giant cards or illustration disclaimer.
+Optional --numeric-overlay adds 22 + 7 + 1 = 30 at y440 during 29.5–34.5s;
+off by default, so captions carry the story.
+H.264 CRF18 fast preset, encoder threads2; --preset medium supported.
+No no-caption master requested by default, to avoid unnecessary encoding.
+
+AUDIO
+Original procedural, deterministic warm pad/damped pluck score using
+NumPy/SciPy. No stock samples, external composition or paid model calls.
+No percussion. Sparse plucks, open minor/major harmony, subtle stereo room
+reflections, band-limited warm texture, 2.5-second ending fade.
+Music level set below narration and further ducked by up to 7dB.
+Full narration retained, then two-pass loudness/true-peak normalization.
+Normalization may invoke dynamic limiting to meet the peak target; this
+changes gain, not speech speed/timing.
+Target -16 LUFS integrated; -1.5dBTP master ceiling leaves AAC headroom.
+Preparation measures both PCM master and an actual AAC192k encoding test.
+No listening review is claimed; main must hear playback for taste.
+
+CURRENT PREPARED AUDIO
+  assembly_work/original-warm-mystery-bed.wav
+  assembly_work/ducked-music-bed.wav
+  assembly_work/mix-before-normalization.wav
+  assembly_work/final-mix.wav
+  assembly_work/audio-encode-test.m4a
+  qa/audio-preparation.json
+  qa/*loudness.log
+  qa/normalization.log
+
+The float premix may exceed 0dBFS without clipping; it is intentionally
+floating point. The normalized PCM and AAC outputs meet the peak ceiling.
+
+RENDER OUTPUTS
+  somehow-true-baarle-full.mp4
+  assembly_manifest.json      input hashes, durations, boundaries, frame counts
+  qa/final-ffprobe.json
+  qa/final-audio-stats.json   LUFS, true peak, decoded sample peak, clipped count
+  qa/final-astats.log
+  qa/final-loudness.log
+  qa/final-contact-sheet.jpg  two timestamped samples per shot
+  qa/frame-*.jpg              contact-sheet individual frames
+  qa/render.log
+
+QA fails loudly if source frame count is not preserved, rate/dimensions
+are wrong, decode fails, LUFS is outside -16 +/-0.8 or true peak exceeds
+-1dBTP. It also records decoded AAC clipped-sample count.
+
+PROVENANCE SUGGESTION FOR DESCRIPTION (NOT A BURNED DISCLAIMER)
+AI-generated illustrative footage. 720x1280 source upscaled to 1080x1920.
+Original procedural music. Add the parent agent's verified factual source
+URLs and the narration provenance in the final description.

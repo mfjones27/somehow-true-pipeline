@@ -1,0 +1,35 @@
+{
+  "content_id": "replace-with-verified-content-id",
+  "script_version": "v1",
+  "duration": 45.0,
+  "narration_audio": "pilot/narration.wav",
+  "output_name": "final.mp4",
+  "scenes": [
+    {
+      "start": 0.0,
+      "end": 15.0,
+      "text": "Replace with verified opening.",
+      "narration_transcript": "Replace with the exact approved narration for this scene.",
+      "visual_style": "orbit"
+    },
+    {
+      "start": 15.0,
+      "end": 30.0,
+      "text": "Replace with the explanation.",
+      "narration_transcript": "Replace with the exact approved narration for this scene.",
+      "visual_style": "wave"
+    },
+    {
+      "start": 30.0,
+      "end": 45.0,
+      "text": "Replace with the payoff.",
+      "narration_transcript": "Replace with the exact approved narration for this scene.",
+      "visual_style": "network"
+    }
+  ],
+  "captions": [
+    {"start": 0.0, "end": 3.0, "text": "Replace every caption and its explicit timing."},
+    {"start": 15.0, "end": 18.0, "text": "These are placeholders, not a finished script."},
+    {"start": 30.0, "end": 33.0, "text": "Add captions for the remaining narration."}
+  ]
+}
