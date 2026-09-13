@@ -18,7 +18,8 @@ COPY . .
 
 # Default port for Railway
 ENV PORT=8000
+ENV PIPELINE_ENABLED=false PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 EXPOSE 8000
 
-# Run the FastAPI server
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+# app.py reads Railway's PORT; no shell expansion or generation at startup.
+CMD ["python", "app.py"]

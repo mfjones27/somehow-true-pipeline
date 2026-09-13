@@ -1,11 +1,12 @@
 # Somehow True Pipeline
 
-Automated video production pipeline for the Somehow True YouTube channel. Generates cinematic short-form videos from scripted narration using Runway AI visuals, automated captions, and procedural music — all in one pass.
+Video production prototype for the Somehow True YouTube channel. **Deploy in idle mode only:** generation and publishing are not activation-ready. Deploying the API is not approval to produce or publish content.
 
 ## Architecture
 
 ```
-Script → TTS narration → Runway clips → Whisper captions → ffmpeg assembly → YouTube upload
+Approved script + supplied narration → Runway clips → Whisper captions → ffmpeg assembly
+                                                                      → upload metadata only
 ```
 
 | Component | Tool | Cost |
@@ -14,10 +15,10 @@ Script → TTS narration → Runway clips → Whisper captions → ffmpeg assemb
 | Captions | faster-whisper | Free (local) |
 | Music | scipy + numpy (procedural) | Free (local) |
 | Assembly | ffmpeg (Lanczos upscale + burn) | Free (local) |
-| Upload | YouTube Data API | Free |
-| **Total per video** | | **~500-1,500 credits** |
+| Upload | Metadata preparation only; uploader not implemented | Not validated |
+| **Historical estimate per video** | | **~500-1,500 credits; not current pricing or authorization** |
 
-## Quick Start (Local)
+## Quick Start (Local, Idle API)
 
 ```bash
 # Install dependencies
@@ -26,15 +27,16 @@ pip install -r requirements.txt
 # System: ffmpeg, fonts-lato (or fonts-dejavu as fallback)
 # Ubuntu: sudo apt install ffmpeg fonts-lato fonts-dejavu
 
-# Run with existing assets (test mode)
-python produce_video.py --config config.example.json --skip-runway --skip-captions
-
-# Run full pipeline
-python produce_video.py --config config.json
-
-# Run daily automation
-python daily_pipeline.py
+# Supply a unique random API_TOKEN through your secret manager/environment.
+# Do not commit the token, provider credentials, or .env files.
+export PIPELINE_ENABLED=false
+python app.py
 ```
+
+`python app.py` starts the API only. It does not import the media pipeline,
+contact providers, generate narration, load models, produce video, or upload.
+Without `API_TOKEN`, only `GET /health` can be accessed.
+Do not run either pipeline CLI or configure a cron job during deployment.
 
 ## Railway Deployment
 
@@ -42,7 +44,9 @@ python daily_pipeline.py
 
 1. A [Railway](https://railway.app) account
 2. A [GitHub](https://github.com) account
-3. Runway API key (for video generation)
+3. A unique high-entropy `API_TOKEN` stored as a Railway secret variable
+
+No Runway, YouTube, Drive, Notion or TTS credentials are needed for idle deployment.
 
 ### Deploy Steps
 
@@ -57,52 +61,104 @@ python daily_pipeline.py
    - Select "Deploy from GitHub repo"
    - Choose your `somehow-true-pipeline` repo
 
-3. **Railway auto-detects** the `Dockerfile` and `railway.toml` — no manual config needed.
+3. Use the repository `Dockerfile` and `railway.toml`. Both start `python app.py`,
+   which binds `0.0.0.0` using Railway's `PORT` (default `8000` locally).
 
 4. **Set environment variables** in Railway:
    ```
-   RUNWAY_API_KEY=your_key_here
-   YOUTUBE_API_KEY=your_key_here   # optional, for uploads
+   PIPELINE_ENABLED=false
+   API_TOKEN=<unique-random-secret>
    ```
 
-5. **Deploy** — Railway builds the Docker image (installs ffmpeg + Python deps) and starts the FastAPI server.
+5. **Deploy** — Railway builds the Docker image (installs ffmpeg + Python deps) and starts the idle FastAPI server. Build-time package downloads are expected; server startup performs no provider/model/generation calls.
+6. Verify `GET /health` returns `200`. Do not enable production as a deployment test.
+
+Only the value `true` (case-insensitive, ignoring surrounding spaces) enables
+production routes; missing, false, and unknown values remain disabled. This switch
+is an operational lock, **not** a content approval or publishing-policy engine.
+All non-health requests require `Authorization: Bearer <API_TOKEN>`. Missing,
+blank, or incorrect credentials return `401`, including when the server token is
+unset. Authenticated `/produce` requests return `503` in idle mode before request
+body validation, job creation, background scheduling, or subprocess execution.
+Interactive docs and the OpenAPI endpoint are disabled.
 
 ### API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Health check (Railway uses this) |
-| POST | `/produce` | Run pipeline from config or content ID |
-| POST | `/produce/daily` | Pick next content, generate video |
-| GET | `/queue` | Show content queue status |
-| GET | `/jobs/{job_id}` | Check background job status |
+| GET | `/health` | Public liveness only (not provider/pipeline readiness) |
+| POST | `/produce` | Authenticated; blocked with `503` in idle mode |
+| POST | `/produce/daily` | Authenticated; blocked with `503` in idle mode |
+| GET | `/queue` | Authenticated; runs the local read-only queue-list command |
+| GET | `/jobs/{job_id}` | Authenticated; checks in-memory job status |
 
-### Example: Trigger a video via API
+### Safe deployment verification
 
 ```bash
-# Test render (no Runway, no captions — uses existing clips)
-curl -X POST https://your-app.up.railway.app/produce \
-  -H "Content-Type: application/json" \
-  -d '{"content_id": "FCT-011", "skip_runway": true, "skip_captions": true}'
+# Public liveness: expect 200.
+curl -i https://your-app.up.railway.app/health
 
-# Full production
-curl -X POST https://your-app.up.railway.app/produce/daily \
+# Without authentication: expect 401.
+curl -i https://your-app.up.railway.app/queue
+
+# Only while PIPELINE_ENABLED=false: expect 503, no job or media work.
+curl -i -X POST https://your-app.up.railway.app/produce/daily \
+  -H "Authorization: Bearer $API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
 
-### Cron Deployment (Daily Auto-Post)
-
-Railway supports cron deployments. To run the pipeline daily:
-
-1. In Railway, go to your service → **Settings** → **Cron Jobs**
-2. Add a cron schedule: `0 10 * * *` (10:00 AM UTC daily)
-3. Command: `python daily_pipeline.py`
-
-Or use Railway's built-in scheduler with the command:
+### Offline safety tests
 ```bash
-python daily_pipeline.py --upload
+python -m unittest discover -s tests -v
 ```
+
+These tests use in-memory HTTP requests and the standard library, with no extra
+test-client dependency. They reject subprocess/network/file-write/background-task
+side effects and cover public health, authentication, disabled production, disabled
+docs, startup and port handling. They do not execute the media pipeline.
+
+## Known integration limits — blockers before activation
+
+- **Runway authentication is not wired.** `produce_video.py` sends an API version
+  header but no bearer credential and does not read `RUNWAY_API_KEY`.
+  `space_next/runway_tasks.py` assumes runtime-proxy authentication and invokes
+  `curl`, which the Dockerfile does not install. That sandbox helper is not a
+  portable Railway integration. No sandbox-only executable was found in the two
+  main pipeline scripts: their executable dependencies are Python, ffmpeg and
+  ffprobe; the external authentication/connector assumptions are the gap.
+- **Narration is not generated automatically.** `daily_pipeline.py` requires an
+  existing WAV or stops with code `2`; installed `gTTS`/`edge-tts` packages are not
+  a wired TTS provider. Legacy fallback can select pilot narration for unrelated
+  content. Example clips/narration/captions are not bundled in this deployment.
+- **Whisper is not offline on first use.** Caption generation may download a model.
+  Validate capacity, model storage, licensing and budgets separately. Runtime
+  requirements retain broad minimum versions; this patch is not a dependency
+  lock, security audit or reproducible-build guarantee.
+- **No implemented uploads or tracking sync.** Drive, YouTube and Notion routines
+  prepare local payloads rather than perform authenticated operations. Agent
+  connectors do not automatically transfer into a standalone Railway container.
+  A YouTube API key alone cannot upload: insert operations need OAuth authorization
+  for the correct account ([YouTube API authentication requirements](https://developers.google.com/youtube/v3/docs),
+  [OAuth guide](https://developers.google.com/youtube/v3/guides/authentication)).
+  `daily_pipeline.py --upload` is not a supported argument.
+- **Required approvals are not implemented.** The prototype does not enforce
+  evidence, history, rights, budget, originality, disclosure/audience settings,
+  exact-package approval or release review. Its legacy payload instructions say
+  `privacyStatus='public'`; those instructions are not authorization and must not
+  be acted on. Keep `final_publish_allowed=false`; production authorization and
+  publication approval are separate. Required policy files must be synced/read
+  before future channel work; a local CSV is not canonical Notion CONTENT_PIPELINE.
+- **Active API needs further engineering.** Client-supplied config/content paths
+  are not restricted to a safe directory; synchronous subprocesses can block
+  requests, jobs are volatile, timeouts/concurrency/rate limits are incomplete,
+  and local files are not durable without storage configuration. The content-ID
+  path can run the daily renderer and then render again. No success response
+  proves editorial QA, completed provider work, remote visibility, or publication.
+- **The switch guards HTTP production only.** Direct CLI execution, shell access
+  and alternative entrypoints bypass it. Do not enable cron or run pipeline CLI
+  commands. Resolve these blockers, implement fail-closed approval controls, and
+  obtain explicit authorization before changing `PIPELINE_ENABLED` to `true`.
 
 ## Project Structure
 

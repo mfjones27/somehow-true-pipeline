@@ -9,16 +9,16 @@ Endpoints:
   GET  /jobs/{job_id}    — check background job status
 
 Environment variables:
-  RUNWAY_API_KEY    — Runway API key for video generation
-  YOUTUBE_API_KEY   — YouTube Data API key (for uploads)
-  GOOGLE_DRIVE_KEY  — Google Drive API key (for uploads)
-  NOTION_API_KEY    — Notion API key (for tracking)
-  OPENAI_API_KEY    — (optional) for TTS narration via OpenAI
+  PIPELINE_ENABLED  — default false; only true permits production requests
+  API_TOKEN         — required bearer token for every route except GET /health
   PORT              — server port (set by Railway, defaults to 8000)
+
+Idle deployment does not need provider credentials. Provider and publishing
+integrations are incomplete; see README before considering activation.
 """
 from __future__ import annotations
 
-import json
+import hmac
 import os
 import subprocess
 import sys
@@ -26,7 +26,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -35,10 +35,43 @@ app = FastAPI(
     title="Somehow True Pipeline",
     description="Automated video production pipeline for Somehow True YouTube channel",
     version="1.0.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 ROOT = Path(__file__).resolve().parent
 JOBS: dict[str, dict] = {}
+
+
+@app.middleware("http")
+async def deployment_guard(request: Request, call_next):
+    """Fail closed before routing, body validation, job creation or subprocesses."""
+    if request.method == "GET" and request.url.path == "/health":
+        return await call_next(request)
+
+    expected = os.environ.get("API_TOKEN", "")
+    scheme, _, supplied = request.headers.get("Authorization", "").partition(" ")
+    if (
+        not expected.strip()
+        or scheme.lower() != "bearer"
+        or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+    ):
+        return JSONResponse(
+            {"detail": "Unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    path = request.url.path.rstrip("/")
+    if (path == "/produce" or path.startswith("/produce/")) and (
+        os.environ.get("PIPELINE_ENABLED", "false").strip().lower() != "true"
+    ):
+        return JSONResponse(
+            {"detail": "Pipeline disabled: deployment is in idle mode"},
+            status_code=503,
+        )
+    return await call_next(request)
 
 
 class ProduceRequest(BaseModel):
