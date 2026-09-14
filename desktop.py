@@ -12,6 +12,13 @@ os.environ["DESKTOP_MODE"] = "true"
 os.environ["PIPELINE_ENABLED"] = "true"
 os.environ.setdefault("SOMEHOW_TRUE_PORT", "8765")
 
+APP_ID = "SomehowTrue.Studio"
+WINDOW_TITLE = "Somehow True"
+
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+
 if getattr(sys, "frozen", False):
     os.environ.setdefault("SOMEHOW_TRUE_ROOT", str(Path(sys.executable).resolve().parent))
 
@@ -22,30 +29,66 @@ load_env()
 PORT = int(os.environ.get("SOMEHOW_TRUE_PORT", "8765"))
 HOST = "127.0.0.1"
 URL = f"http://{HOST}:{PORT}"
-APP_ID = "SomehowTrue.Studio"
+_SERVER_ERROR: list[BaseException] = []
 
 
-def _wait_for_server(timeout: float = 20) -> None:
+def _focus_existing() -> bool:
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_TITLE)
+    if not hwnd:
+        return False
+    ctypes.windll.user32.ShowWindow(hwnd, 9)
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    return True
+
+
+def _studio_alive() -> bool:
+    try:
+        with urllib.request.urlopen(f"{URL}/health", timeout=0.6) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _already_running() -> bool:
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\SomehowTrue.Studio")
+    return ctypes.GetLastError() == 183
+
+
+def _wait_for_server(timeout: float = 25) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if _SERVER_ERROR:
+            raise _SERVER_ERROR[0]
         try:
             with urllib.request.urlopen(f"{URL}/health", timeout=1) as resp:
                 if resp.status == 200:
                     return
         except Exception:
-            time.sleep(0.2)
+            time.sleep(0.15)
     raise RuntimeError(f"Studio did not start on {URL}")
 
 
 def _run_server() -> None:
-    import uvicorn
-    from app import app
+    try:
+        import uvicorn
+        from app import app
 
-    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+        uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+    except Exception as exc:
+        _SERVER_ERROR.append(exc)
+        log = ROOT / "pipeline_output" / "studio-server.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(f"{type(exc).__name__}: {exc}", encoding="utf-8")
 
 
 def _set_window_app_id(hwnd: int, relaunch: str, icon: str) -> None:
-    """Make a python-hosted window pin and relaunch as Somehow True."""
+    """Make this window group with the pinned Somehow True icon."""
     import ctypes
     from ctypes import HRESULT, POINTER, Structure, byref, c_ubyte, c_uint16, c_uint32, c_ushort, c_void_p, c_wchar_p
 
@@ -104,7 +147,7 @@ def _set_window_app_id(hwnd: int, relaunch: str, icon: str) -> None:
     values = {
         5: APP_ID,
         2: f'"{relaunch}"',
-        4: "Somehow True",
+        4: WINDOW_TITLE,
         3: icon,
     }
     for pid, value in values.items():
@@ -122,39 +165,44 @@ def _set_window_app_id(hwnd: int, relaunch: str, icon: str) -> None:
 
 
 def _claim_taskbar(window) -> None:
-    """Pin grouping: frozen exe keeps its own identity. Python hosts claim Somehow True."""
     if sys.platform != "win32":
-        return
-    if getattr(sys, "frozen", False):
         return
     import ctypes
 
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
-    hwnd = ctypes.windll.user32.FindWindowW(None, "Somehow True")
+    hwnd = ctypes.windll.user32.FindWindowW(None, WINDOW_TITLE)
     if not hwnd:
         try:
             hwnd = int(window.native.Handle.ToInt64())
         except Exception:
             return
-    exe = ROOT / "SomehowTrue.exe"
-    relaunch = str(exe if exe.exists() else sys.executable)
+    exe = next(
+        (path for path in (ROOT / "Somehow True.exe", ROOT / "SomehowTrue.exe") if path.exists()),
+        Path(sys.executable),
+    )
     icon = str(ROOT / "ui" / "icon.ico")
     try:
-        _set_window_app_id(hwnd, relaunch, icon)
+        _set_window_app_id(hwnd, str(exe), icon)
     except Exception:
         pass
 
 
 def main() -> int:
     try:
+        if _studio_alive() and _focus_existing():
+            return 0
+        if _already_running() and _focus_existing():
+            return 0
         threading.Thread(target=_run_server, daemon=True).start()
         _wait_for_server()
+        if _SERVER_ERROR:
+            raise _SERVER_ERROR[0]
         import webview
 
         icon = ROOT / "ui" / "icon.ico"
         webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
         window = webview.create_window(
-            "Somehow True",
+            WINDOW_TITLE,
             URL,
             width=1440,
             height=920,
@@ -168,7 +216,7 @@ def main() -> int:
     except Exception as exc:
         if sys.platform == "win32":
             import ctypes
-            ctypes.windll.user32.MessageBoxW(None, str(exc), "Somehow True", 0x10)
+            ctypes.windll.user32.MessageBoxW(None, str(exc), WINDOW_TITLE, 0x10)
         raise
 
 

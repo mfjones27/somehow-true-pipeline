@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-    ...opts,
-  });
+  const headers = { ...(opts.headers || {}) };
+  if (opts.body && !headers["Content-Type"]) {
+    headers["Content-Type"] = "application/json";
+  }
+  const res = await fetch(path, { ...opts, headers });
   const text = await res.text();
   let data = null;
   try {
@@ -43,14 +44,40 @@ export default function App() {
       setDash(await api("/api/dashboard"));
       setError("");
     } catch (err) {
-      setError(String(err.message || err));
+      const message = String(err.message || err);
+      setError(
+        message === "Failed to fetch"
+          ? "Studio backend is not running. Close this window and open Somehow True again."
+          : message,
+      );
     }
   }
 
   useEffect(() => {
-    refresh();
+    let alive = true;
+    async function boot() {
+      for (let i = 0; i < 8; i += 1) {
+        try {
+          const data = await api("/api/dashboard");
+          if (!alive) return;
+          setDash(data);
+          setError("");
+          return;
+        } catch (err) {
+          if (i === 7 && alive) {
+            setError("Studio backend is not running. Close this window and open Somehow True again.");
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+        }
+      }
+    }
+    boot();
     const timer = setInterval(refresh, 4000);
-    return () => clearInterval(timer);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
