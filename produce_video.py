@@ -26,7 +26,7 @@ Config format (see config.example.json):
   "scene_durations": [5, 8, 8, 8, 8, 10],
   "brand": "SOMEHOW TRUE",
   "output_name": "somehow-true-baarle-full.mp4",
-  "youtube_channel_id": "UC7FJMzijz0T-SIll_8SYtaw",
+  "youtube_channel_id": "UCZqmUx29Va8Zud78Fj_0Geg",
   "drive_folder_id": "...",
   "notion_page_id": "...",
   "runway_model": "gen4.5",
@@ -67,17 +67,36 @@ import numpy as np
 from scipy import signal
 from scipy.io import wavfile
 
+from providers.env import load_env
+
+load_env()
+
 ROOT = Path(__file__).resolve().parent
 SR = 48000
-FONT = "/usr/share/fonts/truetype/lato/Lato-Bold.ttf"
+
+
+def resolve_font():
+    for path in (
+        os.environ.get("CAPTION_FONT", ""),
+        "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        r"C:\Windows\Fonts\arialbd.ttf",
+        r"C:\Windows\Fonts\Arial.ttf",
+    ):
+        if path and Path(path).exists():
+            return path
+    return "Arial"
+
+
+FONT = resolve_font()
 
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
-def run(args, log=None, timeout=600):
+def run(args, log=None, timeout=600, cwd=None):
     result = subprocess.run(
         [str(a) for a in args], stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, timeout=timeout,
+        stderr=subprocess.PIPE, text=True, timeout=timeout, cwd=cwd,
     )
     if log:
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -87,8 +106,8 @@ def run(args, log=None, timeout=600):
     return result
 
 
-def ffmpeg(args, log=None, timeout=600):
-    return run(["ffmpeg", "-hide_banner", "-y", "-threads", "2", *args], log, timeout)
+def ffmpeg(args, log=None, timeout=600, cwd=None):
+    return run(["ffmpeg", "-hide_banner", "-y", "-threads", "2", *args], log, timeout, cwd=cwd)
 
 
 def ffprobe(path):
@@ -125,7 +144,17 @@ def srt_time(seconds):
 # ─── Step 1: Runway Generation (batch) ───────────────────────────────────────
 
 RUNWAY_BASE = "https://api.dev.runwayml.com/v1"
-RUNWAY_HEADERS = {"X-Runway-Version": "2024-11-06"}
+
+
+def runway_headers():
+    key = os.environ.get("RUNWAY_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("RUNWAY_API_KEY is missing")
+    return {
+        "Authorization": f"Bearer {key}",
+        "X-Runway-Version": "2024-11-06",
+        "Content-Type": "application/json",
+    }
 
 
 def generate_runway_clips(config, work_dir):
@@ -137,6 +166,7 @@ def generate_runway_clips(config, work_dir):
     durations = config["scene_durations"]
     model = config.get("runway_model", "gen4.5")
     ratio = config.get("runway_ratio", "720:1280")
+    headers = runway_headers()
 
     results = []
 
@@ -156,13 +186,24 @@ def generate_runway_clips(config, work_dir):
                 results.append({"scene": i, "status": "polling", "task_id": task_id})
                 continue
 
-        resp = requests.post(f"{RUNWAY_BASE}/text_to_video", headers=RUNWAY_HEADERS, json=request, timeout=90)
+        resp = None
+        for attempt in range(4):
+            resp = requests.post(f"{RUNWAY_BASE}/text_to_video", headers=headers, json=request, timeout=90)
+            if resp.ok:
+                break
+            print(f"  Scene {i}: Runway {resp.status_code}: {resp.text[:400]}")
+            if resp.status_code not in (400, 429, 500, 502, 503):
+                resp.raise_for_status()
+            time.sleep(8 * (attempt + 1))
         resp.raise_for_status()
         data = resp.json()
         task_id = data["id"]
-        write_json(marker, {"task_id": task_id, "request": request, "estimated_cost": data.get("estimatedCost")})
-        results.append({"scene": i, "status": "created", "task_id": task_id})
-        print(f"  Scene {i}: created task {task_id}")
+        estimated = data.get("estimatedCost")
+        write_json(marker, {"task_id": task_id, "request": request, "estimated_cost": estimated})
+        from providers.costs import runway_clip
+        cost = runway_clip(config.get("content_id", "unknown"), model, int(dur), estimated)
+        results.append({"scene": i, "status": "created", "task_id": task_id, "credits": cost["credits"]})
+        print(f"  Scene {i}: created task {task_id} (~{cost['credits']} credits / ${cost['usd']:.2f})")
 
     # Phase 2: Poll all pending tasks in a single loop
     pending = [r for r in results if r["status"] in ("created", "polling")]
@@ -180,16 +221,35 @@ def generate_runway_clips(config, work_dir):
                     continue
 
                 status_file = clips_dir / f"scene{scene:02d}_status.json"
-                resp = requests.get(f"{RUNWAY_BASE}/tasks/{task_id}", headers=RUNWAY_HEADERS, timeout=60)
-                resp.raise_for_status()
-                status_data = resp.json()
+                status_data = None
+                for attempt in range(5):
+                    try:
+                        resp = requests.get(f"{RUNWAY_BASE}/tasks/{task_id}", headers=headers, timeout=60)
+                        resp.raise_for_status()
+                        status_data = resp.json()
+                        break
+                    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                        time.sleep(5 * (attempt + 1))
+                if status_data is None:
+                    still_pending.append(item)
+                    continue
                 write_json(status_file, status_data)
 
                 if status_data["status"] == "SUCCEEDED":
                     output_url = status_data["output"][0]
-                    resp2 = requests.get(output_url, timeout=120)
-                    resp2.raise_for_status()
-                    clip_path.write_bytes(resp2.content)
+                    clip_bytes = None
+                    for attempt in range(5):
+                        try:
+                            resp2 = requests.get(output_url, timeout=120)
+                            resp2.raise_for_status()
+                            clip_bytes = resp2.content
+                            break
+                        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                            time.sleep(5 * (attempt + 1))
+                    if clip_bytes is None:
+                        still_pending.append(item)
+                        continue
+                    clip_path.write_bytes(clip_bytes)
                     receipt = {
                         "task_id": task_id, "file": clip_path.name,
                         "bytes": clip_path.stat().st_size,
@@ -230,7 +290,7 @@ def generate_captions(config, narration_path, output_dir):
         return _ffmpeg_subtitle_fallback(narration_path, output_dir, config)
 
     model_cache = output_dir / "model_cache"
-    model_cache.mkdir(exist_ok=True)
+    model_cache.mkdir(parents=True, exist_ok=True)
     os.environ["HF_HOME"] = str(model_cache)
 
     print("  Loading Whisper small.en model...")
@@ -303,7 +363,7 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Caption,Lato,{font_size},{text_color},{text_color},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,0,3.5,5,95,205,0,1
+Style: Caption,{Path(FONT).stem if Path(FONT).exists() else "Arial"},{font_size},{text_color},{text_color},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,0,3.5,5,95,205,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -553,7 +613,10 @@ def prepare_audio(narration_path, duration, work_dir, qa_dir):
 # ─── Step 4: Video Assembly ──────────────────────────────────────────────────
 
 def filter_path(path):
-    return str(path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    posix = Path(path).resolve().as_posix()
+    if len(posix) >= 2 and posix[1] == ":":
+        posix = posix[0] + "\\:" + posix[2:]
+    return posix.replace("'", "\\'")
 
 
 def assemble_video(clips_dir, narration_path, captions_ass, audio_path, output_path,
@@ -561,14 +624,12 @@ def assemble_video(clips_dir, narration_path, captions_ass, audio_path, output_p
     """Concatenate clips, upscale to 1080x1920, burn captions, mix audio."""
     qa_dir.mkdir(exist_ok=True)
 
-    # Find all scene clips (scene02.mp4 through scene06.mp4)
-    clip_files = sorted(clips_dir.glob("scene0[2-9].mp4"))
+    clip_files = sorted(clips_dir.glob("scene*.mp4"))
+    if intro_clip_path and Path(intro_clip_path).exists():
+        intro = Path(intro_clip_path)
+        clip_files = [intro] + [c for c in clip_files if c.resolve() != intro.resolve()]
     if not clip_files:
         raise RuntimeError("No scene clips found")
-
-    # Prepend intro clip if provided and exists
-    if intro_clip_path and Path(intro_clip_path).exists():
-        clip_files = [Path(intro_clip_path)] + clip_files
 
     # Verify clips
     total_frames = 0
@@ -595,14 +656,16 @@ def assemble_video(clips_dir, narration_path, captions_ass, audio_path, output_p
         + "scale=1080:1920:flags=lanczos,setsar=1,format=yuv420p"
     )
 
-    if brand_text:
+    if brand_text and os.name != "nt" and Path(FONT).exists():
         chain += (
             f",drawtext=fontfile='{FONT}':text='{brand_text}':"
             "fontsize=24:fontcolor=white@0.70:x=58:y=130:"
             "shadowcolor=black@0.35:shadowx=0:shadowy=2"
         )
 
-    chain += f",ass=filename='{filter_path(captions_ass)}'[v]"
+    burn = qa_dir / "burn.ass"
+    burn.write_bytes(Path(captions_ass).read_bytes())
+    chain += ",ass=burn.ass[v]"
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -614,7 +677,7 @@ def assemble_video(clips_dir, narration_path, captions_ass, audio_path, output_p
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",
         str(output_path)
-    ], qa_dir / "render.log", timeout=1200)
+    ], qa_dir / "render.log", timeout=1200, cwd=str(qa_dir))
 
     # Quick QA: verify output
     data = ffprobe(output_path)
@@ -643,54 +706,18 @@ def assemble_video(clips_dir, narration_path, captions_ass, audio_path, output_p
 
 # ─── Step 5: Upload (Drive + YouTube + Notion) ────────────────────────────────
 
-def upload_to_drive(file_path, folder_id, config):
-    """Upload final video to Google Drive. Returns file ID."""
-    # Uses the pplx connector for google_drive
-    import requests
-    # This will be called via pplx connector in the agent context
-    # For now, prepare the upload payload
-    result = {
-        "file_path": str(file_path),
-        "folder_id": folder_id,
-        "file_name": Path(file_path).name,
-        "sha256": sha256(file_path),
-        "size_bytes": Path(file_path).stat().st_size,
-    }
-    print(f"  Drive upload prepared: {result['file_name']} ({result['size_bytes']:,} bytes)")
-    return result
+def upload_to_youtube(video_path, config):
+    """Upload the finished video to YouTube as private with AI disclosure."""
+    from providers.youtube_upload import upload_private
 
-
-def prepare_youtube_upload(drive_file_id, config):
-    """Prepare YouTube upload metadata from Drive file."""
-    result = {
-        "title": config.get("title", ""),
-        "description": config.get("description", ""),
-        "tags": config.get("tags", []),
-        "filePath": f"https://drive.google.com/uc?id={drive_file_id}&export=download",
-        "privacyStatus": "private",
-        "notifySubscribers": False,
-    }
+    result = upload_private(
+        Path(video_path),
+        title=config.get("title", ""),
+        description=config.get("description", ""),
+        tags=config.get("tags", []),
+    )
     write_json(ROOT / "youtube_upload_input.json", result)
-    print(f"  YouTube upload prepared: {result['title']}")
-    return result
-
-
-def prepare_notion_update(config, video_path, qa_results):
-    """Prepare a single Notion page update (not per-asset pages)."""
-    result = {
-        "page_id": config.get("notion_page_id"),
-        "properties": {
-            "status": "rendered_needs_qa",
-            "video_path": str(video_path),
-            "duration_seconds": qa_results.get("duration_seconds"),
-            "file_size_bytes": qa_results.get("file_size_bytes"),
-            "sha256": qa_results.get("sha256"),
-            "loudness_lufs": qa_results.get("loudness_lufs"),
-            "qa_pass": qa_results.get("all_checks_pass"),
-        },
-    }
-    write_json(ROOT / "notion_update_payload.json", result)
-    print(f"  Notion update prepared for page {result['page_id']}")
+    print(f"  YouTube private upload: {result['url']}")
     return result
 
 
@@ -715,8 +742,8 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
         state["steps"].append({"step": "runway", "results": clip_results})
         print()
     else:
-        # Use existing clips from config-specified directory
-        clips_dir = ROOT / config.get("clips_dir", "full_pilot")
+        raw_clips = config.get("clips_dir")
+        clips_dir = ROOT / raw_clips if raw_clips else work_dir / "clips"
         print(f"STEP 1: Using existing clips from {clips_dir}\n")
 
     # Step 2: Caption generation
@@ -727,12 +754,13 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
     if not skip_captions:
         print("STEP 2: Generating captions (single Whisper pass)...")
         caption_dir = work_dir / "captions"
+        caption_dir.mkdir(parents=True, exist_ok=True)
         caption_results = generate_captions(config, narration_path, caption_dir)
         state["steps"].append({"step": "captions", "results": caption_results})
         print()
     else:
-        # Use existing captions from config-specified directory
-        caption_dir = ROOT / config.get("captions_dir", "full_pilot/captions")
+        raw_captions = config.get("captions_dir")
+        caption_dir = ROOT / raw_captions if raw_captions else work_dir / "captions"
         print(f"STEP 2: Using existing captions from {caption_dir}\n")
 
     # Step 3: Audio preparation
@@ -752,7 +780,8 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
     captions_ass = caption_dir / "captions.ass"
     brand = config.get("brand", "SOMEHOW TRUE")
     scene_durations = config.get("scene_durations", [])
-    intro_clip = ROOT / config.get("intro_clip", "runway-test-raw.mp4")
+    intro_raw = config.get("intro_clip")
+    intro_clip = (ROOT / intro_raw) if intro_raw else None
 
     video_path, video_qa = assemble_video(
         clips_dir, narration_path, captions_ass, audio_path,
@@ -764,23 +793,9 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
 
     # Step 5: Upload (optional)
     if upload:
-        print("STEP 5: Preparing uploads...")
-        drive_result = upload_to_drive(
-            video_path,
-            config.get("drive_folder_id", ""),
-            config
-        )
-        youtube_result = prepare_youtube_upload(
-            drive_result.get("file_id", "PENDING"),
-            config
-        )
-        notion_result = prepare_notion_update(config, video_path, video_qa)
-        state["steps"].append({
-            "step": "upload",
-            "drive": drive_result,
-            "youtube": youtube_result,
-            "notion": notion_result,
-        })
+        print("STEP 5: Uploading to YouTube as private...")
+        youtube_result = upload_to_youtube(video_path, config)
+        state["steps"].append({"step": "upload", "youtube": youtube_result})
         print()
 
     # Final state
@@ -799,6 +814,9 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
     print(f"QA: {'PASS' if video_qa['all_checks_pass'] else 'CHECK NEEDED'}")
     print(f"State: {work_dir / 'pipeline_state.json'}")
     print(f"{'='*60}")
+    from providers.costs import print_summary
+    state["spend"] = print_summary(content_id)
+    write_json(work_dir / "pipeline_state.json", state)
 
     return state
 
@@ -808,7 +826,7 @@ def main():
     parser.add_argument("--config", required=True, help="Path to config JSON")
     parser.add_argument("--skip-runway", action="store_true", help="Use existing clips")
     parser.add_argument("--skip-captions", action="store_true", help="Use existing captions")
-    parser.add_argument("--upload", action="store_true", help="Prepare Drive/YouTube/Notion uploads")
+    parser.add_argument("--upload", action="store_true", help="Upload the finished video to YouTube as private")
     args = parser.parse_args()
     run_pipeline(args.config, args.skip_runway, args.skip_captions, args.upload)
 

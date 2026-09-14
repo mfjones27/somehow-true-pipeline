@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
-"""Daily automated pipeline — picks content, generates video, prepares uploads.
-
-Designed to be called by a scheduled task (cron). The agent's role:
-1. Run this script to pick content + generate config + run the pipeline
-2. Call Drive connector to upload the final video
-3. Call YouTube connector to upload + publish as public
-4. Call Notion connector to update tracking
+"""Daily automated pipeline — research, narrate, render, upload private.
 
 Usage:
-  python daily_pipeline.py                    # pick next ready content
+  python daily_pipeline.py                    # next unproduced row
   python daily_pipeline.py --content FCT-005  # specific content
   python daily_pipeline.py --list             # show queue status
-
-Content selection: picks the first row from CONTENT.csv that has a script
-but hasn't been produced yet (no video_uri in the CSV).
 """
 from __future__ import annotations
 
@@ -21,12 +12,19 @@ import argparse
 import csv
 import hashlib
 import json
-import os
 import re
 import subprocess
 import sys
-import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+from providers.env import load_env
+from providers.costs import print_summary
+from providers.elevenlabs_tts import synthesize
+from providers.openai_research import hunt_viral_idea, research_topic, runway_prompts_for_script
+from providers.youtube_upload import credentials_ready, youtube_title
+
+load_env()
 
 ROOT = Path(__file__).resolve().parent
 CONTENT_CSV = ROOT / "CONTENT.csv"
@@ -104,8 +102,8 @@ CAMERA_MOVEMENTS = [
     "slow camera pull back revealing the wider context",
 ]
 
-# Scene durations matching the original pipeline
-SCENE_DURATIONS = [5, 8, 8, 8, 8, 10]
+# 45-second short: six clips, no leftover 10s tail
+SCENE_DURATIONS = [5, 8, 8, 8, 8, 8]
 
 
 def load_content_queue():
@@ -130,8 +128,33 @@ def save_produced_log(log):
     PRODUCED_LOG.write_text(json.dumps(log, indent=2) + "\n")
 
 
+def save_content_queue(rows):
+    if not rows:
+        return
+    fieldnames = list(rows[0].keys())
+    with open(CONTENT_CSV, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def update_content_row(cid, **fields):
+    rows = load_content_queue()
+    updated = None
+    for row in rows:
+        if row["id"] == cid:
+            row.update({k: "" if v is None else str(v) for k, v in fields.items()})
+            row["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            updated = row
+            break
+    if updated is None:
+        raise RuntimeError(f"Content {cid} not found in CONTENT.csv")
+    save_content_queue(rows)
+    return updated
+
+
 def pick_next_content():
-    """Pick the first content row that has a script but hasn't been produced."""
+    """Pick the first unproduced row. Script can be filled by Astra on this run."""
     rows = load_content_queue()
     log = load_produced_log()
     produced = set(log.get("produced", []))
@@ -139,8 +162,6 @@ def pick_next_content():
     for row in rows:
         cid = row["id"]
         if cid in produced:
-            continue
-        if not row.get("script", "").strip():
             continue
         if row.get("video_uri", "").strip():
             continue
@@ -200,41 +221,44 @@ def generate_scene_prompts(topic, script):
     return prompts
 
 
-def generate_config(content_row, narration_path=None):
+def load_research(cid):
+    path = ROOT / "pipeline_output" / cid / "research.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {}
+
+
+def generate_config(content_row, narration_path=None, researched=None):
     """Generate a full pipeline config from a content row."""
     cid = content_row["id"]
     topic = content_row["topic"]
     script = content_row["script"]
     core_fact = content_row.get("core_fact", "")
+    researched = researched or load_research(cid)
 
-    # Parse sources from core_fact (URLs in parentheses)
-    source_urls = re.findall(r'https?://[^\)]+]', core_fact)
+    source_urls = researched.get("sources") or re.findall(r'https?://[^\s\)\]]+', core_fact)
+    scene_prompts = researched.get("scene_prompts") or generate_scene_prompts(topic, script)
+    scene_durations = researched.get("scene_durations") or SCENE_DURATIONS[: len(scene_prompts)]
 
-    # Generate scene prompts
-    scene_prompts = generate_scene_prompts(topic, script)
+    description = researched.get("description")
+    if not description:
+        description = f"{core_fact}\n\nSomehow True: facts that sound made up, checked before we tell them.\n"
+        if source_urls:
+            description += "\nSources:\n"
+            for url in source_urls[:5]:
+                description += f"{url}\n"
+        description += "\nVisuals are AI-generated illustrations. Narration is synthetic. Music is original computer-generated.\n"
+        description += f"\n#Shorts #{content_row.get('category', 'SomehowTrue').split('/')[0].strip()} #SomehowTrue"
 
-    # Build description
-    description = f"{core_fact}\n\nSomehow True: facts that sound made up, checked before we tell them.\n"
-    if source_urls:
-        description += "\nSources:\n"
-        for url in source_urls[:5]:
-            description += f"{url}\n"
-    description += "\nVisuals are AI-generated illustrations. Narration is synthetic. Music is original computer-generated.\n"
-    description += f"\n#Shorts #{content_row.get('category', 'SomehowTrue').split('/')[0].strip()} #SomehowTrue"
-
-    # Tags from topic and category
     category = content_row.get("category", "").split("/")[0].strip()
-    tags = [word for word in re.findall(r'\b[A-Za-z]{3,}\b', topic)][:5]
-    tags.extend(["Somehow True", "Shorts", category])
-    tags = list(dict.fromkeys(tags))  # dedupe preserving order
+    tags = list(researched.get("tags") or [])
+    if not tags:
+        tags = [word for word in re.findall(r'\b[A-Za-z]{3,}\b', topic)][:5]
+        tags.extend(["Somehow True", "Shorts", category])
+    tags = list(dict.fromkeys(tags))
 
-    # Title: use the hook if available, otherwise topic
     hook = content_row.get("hook", "").strip()
-    title = hook if hook else topic
-    # Clean up title for YouTube
-    title = re.sub(r'\s+', ' ', title).strip()
-    if len(title) > 100:
-        title = title[:97] + "..."
+    title = youtube_title(hook if hook else topic)
 
     config = {
         "content_id": cid,
@@ -248,10 +272,10 @@ def generate_config(content_row, narration_path=None):
         "intro_clip": None,
         "narration_path": str(narration_path) if narration_path else None,
         "scene_prompts": scene_prompts,
-        "scene_durations": SCENE_DURATIONS,
+        "scene_durations": scene_durations,
         "brand": "SOMEHOW TRUE",
         "output_name": f"somehow-true-{cid.lower()}.mp4",
-        "youtube_channel_id": "UC7FJMzijz0T-SIll_8SYtaw",
+        "youtube_channel_id": "UCZqmUx29Va8Zud78Fj_0Geg",
         "runway_model": "gen4.5",
         "runway_ratio": "720:1280",
         "caption_font": "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
@@ -294,54 +318,55 @@ def run_daily(content_id=None, narration_path=None):
     topic = content_row["topic"]
     print(f"Selected: {cid} — {topic[:60]}...")
 
-    if not content_row.get("script", "").strip():
-        print(f"ERROR: {cid} has no script. Skipping.")
-        return 1
-
-    # Step 1: Generate config
-    print("\nGenerating pipeline config...")
-    config = generate_config(content_row, narration_path)
-
-    # Save config
     config_dir = ROOT / "pipeline_output" / cid
     config_dir.mkdir(parents=True, exist_ok=True)
+
+    researched = load_research(cid)
+    if not content_row.get("script", "").strip():
+        print(f"\nResearching {cid} with GPT-6 Astra + web search...")
+        researched = research_topic(topic, content_row.get("core_fact", ""))
+        content_row = update_content_row(
+            cid,
+            hook=researched["hook"],
+            core_fact=researched["core_fact"],
+            script=researched["script"],
+            script_version=str(int(content_row.get("script_version") or 0) + 1),
+            status="Fact check",
+        )
+        (config_dir / "research.json").write_text(json.dumps(researched, indent=2) + "\n")
+        print(f"Script and {len(researched['scene_prompts'])} Runway prompts saved for {cid}")
+    elif not researched.get("scene_prompts"):
+        print(f"\nAstra writing 6 Runway prompts for existing {cid} script...")
+        prompts = runway_prompts_for_script(content_row["script"], topic, cid)
+        researched = {**researched, **prompts, "script": content_row["script"]}
+        (config_dir / "research.json").write_text(json.dumps(researched, indent=2) + "\n")
+        print(f"{len(prompts['scene_prompts'])} Runway prompts saved")
+
+    print("\nGenerating pipeline config...")
+    config = generate_config(content_row, narration_path, researched)
     config_path = config_dir / "config.json"
     config_path.write_text(json.dumps(config, indent=2) + "\n")
     print(f"Config saved: {config_path}")
 
-    # Step 2: Check narration
     if not narration_path:
-        # Check for existing narration
-        possible_paths = [
-            ROOT / "video_factory" / "assets" / "pilot" / "narration.wav",
-            ROOT / "pipeline_output" / cid / "narration.wav",
-        ]
-        for p in possible_paths:
-            if p.exists():
-                narration_path = p
-                break
+        existing = config_dir / "narration.wav"
+        if existing.exists():
+            narration_path = existing
 
     if not narration_path or not Path(narration_path).exists():
-        print(f"\n*** NARRATION NEEDED ***")
-        print(f"The agent must generate TTS narration for {cid}.")
-        print(f"Script: {content_row['script'][:200]}...")
-        print(f"Save narration to: {config_dir / 'narration.wav'}")
-        print(f"Then re-run this script with --narration {config_dir / 'narration.wav'}")
-        # Save the script for TTS
-        script_path = config_dir / "script.txt"
-        script_path.write_text(content_row["script"])
-        print(f"Script saved to: {script_path}")
-        return 2  # Special exit code: needs narration
+        print(f"\nGenerating ElevenLabs narration for {cid}...")
+        (config_dir / "script.txt").write_text(content_row["script"])
+        narration_path = synthesize(content_row["script"], config_dir / "narration.wav", cid)
+        print(f"Narration saved: {narration_path}")
 
     config["narration_path"] = str(narration_path)
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 
-    # Step 3: Run the pipeline
-    print(f"\nRunning produce_video.py...")
-    cmd = [
-        sys.executable, str(ROOT / "produce_video.py"),
-        "--config", str(config_path),
-    ]
+    print("\nRunning produce_video.py...")
+    cmd = [sys.executable, str(ROOT / "produce_video.py"), "--config", str(config_path)]
+    should_upload = credentials_ready()
+    if should_upload:
+        cmd.append("--upload")
     print(f"Command: {' '.join(cmd)}")
     result = subprocess.run(cmd)
     if result.returncode:
@@ -351,76 +376,173 @@ def run_daily(content_id=None, narration_path=None):
         save_produced_log(log)
         return 1
 
-    # Step 4: Check output
     output_path = config_dir / config["output_name"]
     if not output_path.exists():
         print(f"ERROR: Output video not found at {output_path}")
         return 1
 
-    print(f"\n{'='*60}")
-    print(f"VIDEO PRODUCED: {cid}")
+    print(f"\nVIDEO PRODUCED: {cid}")
     print(f"Output: {output_path}")
     print(f"Size: {output_path.stat().st_size:,} bytes")
-    print(f"{'='*60}")
 
-    # Step 5: Mark as produced
     log = load_produced_log()
     log.setdefault("produced", []).append(cid)
     save_produced_log(log)
 
-    # Step 6: Prepare upload payloads for the agent
-    upload_payload = {
-        "content_id": cid,
-        "video_path": str(output_path),
-        "video_filename": output_path.name,
-        "title": config["title"],
-        "description": config["description"],
-        "tags": config["tags"],
-        "youtube_channel_id": config["youtube_channel_id"],
-        "notion_page_id": None,  # Will be set by agent
-        "drive_folder_id": None,  # Will be set by agent
-        "instructions": [
-            f"1. Upload {output_path.name} to Google Drive (05_Renders folder)",
-            f"2. Upload video to YouTube with title='{config['title']}'",
-            f"   description from config, tags={config['tags']}, privacyStatus='public'",
-            f"3. Update Notion: mark {cid} as published with video URL",
-        ],
-    }
-    upload_path = config_dir / "upload_payload.json"
-    upload_path.write_text(json.dumps(upload_payload, indent=2) + "\n")
-    print(f"\nUpload payload saved: {upload_path}")
-    print(f"\nAGENT NEXT STEPS:")
-    for step in upload_payload["instructions"]:
-        print(f"  {step}")
+    youtube_url = ""
+    duration_seconds = ""
+    state_path = config_dir / "pipeline_state.json"
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        duration_seconds = str(state.get("output_qa", {}).get("duration_seconds", "") or "")
+        for step in state.get("steps", []):
+            if step.get("step") == "upload":
+                youtube_url = step.get("youtube", {}).get("url", "")
 
+    update_content_row(
+        cid,
+        status="rendered_needs_qa",
+        video_uri=youtube_url or str(output_path),
+        duration_seconds=duration_seconds,
+    )
+    if youtube_url:
+        print(f"YouTube (private): {youtube_url}")
+        print("Open Studio on your phone, confirm the AI label, then switch to public.")
+    elif should_upload:
+        print("Upload was requested but no YouTube URL was written.")
+    else:
+        print("YouTube OAuth not set. Video is local only.")
+
+    print_summary(cid)
     return 0
 
 
-def list_queue():
-    """Show the content queue status."""
+def next_content_id(rows=None) -> str:
+    rows = rows if rows is not None else load_content_queue()
+    nums = []
+    for row in rows:
+        match = re.match(r"FCT-(\d+)$", row.get("id", ""))
+        if match:
+            nums.append(int(match.group(1)))
+    return f"FCT-{max(nums, default=0) + 1:03d}"
+
+
+def enqueue_idea(idea: str, category: str = "", *, surprise: bool = False) -> dict:
+    """Astra sharpens a thought into a queue row. Script is written on produce."""
+    idea = (idea or "").strip()
+    if not surprise and len(idea) < 8:
+        raise ValueError("Tell it a little more — a sentence is enough.")
+    rows = load_content_queue()
+    avoid = [r.get("topic", "") for r in rows[-30:]]
+    angle = hunt_viral_idea(idea, avoid=avoid)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    fieldnames = list(rows[0].keys()) if rows else [
+        "id", "topic", "category", "fingerprint", "hook", "core_fact", "script",
+        "script_version", "editorial_score", "status", "fact_check_verdict",
+        "production_approval", "publication_approval", "video_uri", "video_sha256",
+        "duration_seconds", "created_at", "updated_at",
+    ]
+    row = {key: "" for key in fieldnames}
+    row.update({
+        "id": next_content_id(rows),
+        "topic": angle["topic"],
+        "category": (category or angle["category"] or "Idea").strip(),
+        "fingerprint": hashlib.sha256(angle["topic"].encode()).hexdigest(),
+        "hook": angle["hook"],
+        "core_fact": angle["core_fact"],
+        "script_version": "0",
+        "editorial_score": "0",
+        "status": "Needs research",
+        "created_at": now,
+        "updated_at": now,
+    })
+    rows.append(row)
+    save_content_queue(rows)
+    return {**row, "angle": angle["angle"]}
+
+
+def queue_snapshot() -> dict:
     rows = load_content_queue()
     log = load_produced_log()
     produced = set(log.get("produced", []))
     failed = set(log.get("failed", []))
+    items = []
+    for row in rows:
+        cid = row["id"]
+        items.append({
+            "id": cid,
+            "topic": row.get("topic", ""),
+            "category": row.get("category", ""),
+            "hook": row.get("hook", ""),
+            "status": row.get("status", ""),
+            "has_script": bool(row.get("script", "").strip()),
+            "produced": cid in produced or bool(str(row.get("video_uri", "")).strip()),
+            "failed": cid in failed,
+            "video_uri": row.get("video_uri", ""),
+        })
+    ready = sum(1 for item in items if not item["produced"])
+    return {
+        "rows": items,
+        "ready": ready,
+        "produced": sum(1 for item in items if item["produced"]),
+        "failed": len(failed),
+        "total": len(items),
+    }
 
-    print(f"\nCONTENT QUEUE STATUS")
+
+def list_queue():
+    """Show the content queue status."""
+    snap = queue_snapshot()
+    print("\nCONTENT QUEUE STATUS")
     print(f"{'='*80}")
     print(f"{'ID':<10} {'Status':<15} {'Script':<8} {'Produced':<10} {'Topic':<40}")
     print(f"{'-'*80}")
-    for row in rows:
-        has_script = "YES" if row.get("script", "").strip() else "no"
-        is_produced = "YES" if row["id"] in produced else "no"
-        is_failed = " (FAILED)" if row["id"] in failed else ""
+    for row in snap["rows"]:
+        has_script = "YES" if row["has_script"] else "no"
+        is_produced = "YES" if row["produced"] else "no"
+        is_failed = " (FAILED)" if row["failed"] else ""
         print(f"{row['id']:<10} {row['status']:<15} {has_script:<8} {is_produced:<10} {row['topic'][:40]}{is_failed}")
+    print(f"\n{snap['ready']} content rows not yet produced")
+    print(f"{snap['produced']} already produced, {snap['failed']} failed")
 
-    ready = sum(1 for r in rows if r.get("script", "").strip() and r["id"] not in produced)
-    print(f"\n{ready} content rows ready for production (have script, not yet produced)")
-    print(f"{len(produced)} already produced, {len(failed)} failed")
+
+def list_videos() -> list[dict]:
+    out = []
+    base = ROOT / "pipeline_output"
+    if not base.exists():
+        return out
+    for folder in sorted(base.iterdir(), reverse=True):
+        if not folder.is_dir() or folder.name in {"scripts"}:
+            continue
+        cfg_path = folder / "config.json"
+        if not cfg_path.exists():
+            continue
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        state = {}
+        state_path = folder / "pipeline_state.json"
+        if state_path.exists():
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        youtube = ""
+        for step in state.get("steps", []):
+            if step.get("step") == "upload":
+                youtube = (step.get("youtube") or {}).get("url", "")
+        mp4 = folder / cfg.get("output_name", f"somehow-true-{folder.name.lower()}.mp4")
+        out.append({
+            "id": cfg.get("content_id", folder.name),
+            "title": cfg.get("title", folder.name),
+            "youtube": youtube,
+            "local": str(mp4) if mp4.exists() else "",
+            "duration_seconds": (state.get("output_qa") or {}).get("duration_seconds"),
+            "complete": bool(state.get("all_steps_complete")),
+        })
+    return out
 
 
 def main():
     parser = argparse.ArgumentParser(description="Daily automated video pipeline")
     parser.add_argument("--content", help="Specific content ID to produce")
+    parser.add_argument("--idea", help="Sharpen a freeform idea with Astra, then produce")
+    parser.add_argument("--surprise", action="store_true", help="Let Astra pick a viral fact, then produce")
     parser.add_argument("--narration", help="Path to narration WAV file")
     parser.add_argument("--list", action="store_true", help="Show queue status")
     args = parser.parse_args()
@@ -428,6 +550,12 @@ def main():
     if args.list:
         list_queue()
         return 0
+
+    if args.idea or args.surprise:
+        row = enqueue_idea(args.idea or "", surprise=args.surprise)
+        print(f"Queued {row['id']}: {row.get('hook') or row['topic']}")
+        print(f"Angle: {row.get('angle', '')}")
+        return run_daily(row["id"], args.narration)
 
     return run_daily(args.content, args.narration)
 

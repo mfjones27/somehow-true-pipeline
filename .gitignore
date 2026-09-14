@@ -1,6 +1,10 @@
 # Environment variables
 .env
 *.env
+client_secret.json
+client_secrets.json
+client_secret*.json
+token.json
 
 # Python
 __pycache__/
@@ -31,6 +35,18 @@ Thumbs.db
 .vscode/
 .idea/
 .cursor/
+
+# Frontend
+ui/node_modules/
+
+# PyInstaller
+/build/
+/dist/
+/desktop_dist/
+/Somehow True/
+Somehow True.spec
+Somehow True.exe
+SomehowTrue.exe
 
 # Railway
 .railway/

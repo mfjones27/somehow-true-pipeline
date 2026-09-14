@@ -24,12 +24,18 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
 
 from fastapi import FastAPI, BackgroundTasks, Request
-from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
+
+from providers.env import ROOT, load_env
+from studio_api import router as studio_router
+
+load_env()
 
 app = FastAPI(
     title="Somehow True Pipeline",
@@ -40,14 +46,50 @@ app = FastAPI(
     openapi_url=None,
 )
 
-ROOT = Path(__file__).resolve().parent
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:8765"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(studio_router)
+
 JOBS: dict[str, dict] = {}
+UI_DIST = ROOT / "ui" / "dist"
+
+
+def _desktop() -> bool:
+    return os.environ.get("DESKTOP_MODE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _local(request: Request) -> bool:
+    host = request.client.host if request.client else ""
+    return host in {"127.0.0.1", "::1", "localhost"}
+
+
+def _open_path(path: str) -> bool:
+    if path in {"/", "/health", "/api/health", "/index.html"}:
+        return True
+    if path.startswith("/assets/") or path.startswith("/api/"):
+        return path.startswith("/assets/") or (path == "/api/health")
+    return path.endswith((".js", ".css", ".ico", ".svg", ".woff2", ".map", ".webmanifest"))
 
 
 @app.middleware("http")
 async def deployment_guard(request: Request, call_next):
-    """Fail closed before routing, body validation, job creation or subprocesses."""
-    if request.method == "GET" and request.url.path == "/health":
+    """Fail closed on Railway. The local desktop app is allowed through."""
+    path = request.url.path.rstrip("/") or "/"
+    if request.method == "OPTIONS" or path == "/health" or _open_path(path):
+        if path in {"/", "/health"} or path.startswith("/assets/") or path.endswith(
+            (".js", ".css", ".ico", ".svg", ".woff2", ".map")
+        ):
+            return await call_next(request)
+        if path == "/api/health":
+            return await call_next(request)
+
+    if _desktop() and _local(request):
         return await call_next(request)
 
     expected = os.environ.get("API_TOKEN", "")
@@ -57,14 +99,17 @@ async def deployment_guard(request: Request, call_next):
         or scheme.lower() != "bearer"
         or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
     ):
-        return JSONResponse(
-            {"detail": "Unauthorized"},
-            status_code=401,
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        if path.startswith("/api/") or path.startswith("/produce") or path.startswith("/queue") or path.startswith("/jobs"):
+            return JSONResponse(
+                {"detail": "Unauthorized"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    path = request.url.path.rstrip("/")
-    if (path == "/produce" or path.startswith("/produce/")) and (
+    producing = path.startswith("/produce") or (
+        request.method == "POST" and path.startswith("/api/")
+    )
+    if producing and not _desktop() and (
         os.environ.get("PIPELINE_ENABLED", "false").strip().lower() != "true"
     ):
         return JSONResponse(
@@ -84,6 +129,7 @@ class ProduceRequest(BaseModel):
 
 class DailyRequest(BaseModel):
     narration_path: Optional[str] = None
+    smoke: bool = False
 
 
 @app.get("/health")
@@ -154,6 +200,35 @@ async def produce(req: ProduceRequest, background_tasks: BackgroundTasks):
     return {"job_id": job_id, "status": "started", "message": "Pipeline running in background"}
 
 
+@app.post("/produce/smoke")
+async def produce_smoke(background_tasks: BackgroundTasks):
+    """Short Astra + ElevenLabs + two Runway clips. No YouTube upload."""
+    job_id = str(uuid.uuid4())[:8]
+    JOBS[job_id] = {
+        "id": job_id, "status": "running", "started_at": time.time(),
+        "result": None, "error": None,
+    }
+
+    def run_smoke():
+        try:
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "test_flow.py")],
+                capture_output=True, text=True, cwd=str(ROOT),
+            )
+            if result.returncode == 0:
+                JOBS[job_id]["status"] = "completed"
+                JOBS[job_id]["result"] = result.stdout[-2000:]
+            else:
+                JOBS[job_id]["status"] = "failed"
+                JOBS[job_id]["error"] = (result.stderr or result.stdout)[-2000:]
+        except Exception as e:
+            JOBS[job_id]["status"] = "failed"
+            JOBS[job_id]["error"] = str(e)
+
+    background_tasks.add_task(run_smoke)
+    return {"job_id": job_id, "status": "started", "message": "Short smoke test running"}
+
+
 @app.post("/produce/daily")
 async def produce_daily(req: DailyRequest, background_tasks: BackgroundTasks):
     """Pick next content from the queue and produce a video."""
@@ -192,6 +267,24 @@ async def job_status(job_id: str):
     if job["status"] == "running":
         job["elapsed_seconds"] = time.time() - job["started_at"]
     return job
+
+
+@app.get("/")
+async def spa_index():
+    index = UI_DIST / "index.html"
+    if index.exists():
+        return FileResponse(index)
+    return {
+        "status": "ok",
+        "service": "somehow-true-pipeline",
+        "ui": "not built — run npm run build in ui/",
+    }
+
+
+if UI_DIST.exists():
+    assets = UI_DIST / "assets"
+    if assets.exists():
+        app.mount("/assets", StaticFiles(directory=assets), name="ui-assets")
 
 
 if __name__ == "__main__":
