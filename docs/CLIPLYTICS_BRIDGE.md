@@ -61,6 +61,18 @@ python import_cliplytics.py --input "C:\Users\Mauri\Documents\Python Projects\Cl
 
 `--write-config` writes `pipeline_output/imports/<CLX-id>/config.json` in the same shape as `config.example.json` / `daily_pipeline.generate_config`. `narration_path` is left empty: run research + TTS (or `daily_pipeline.py --content CLX-001`) before `produce_video.py --config ...`. Imported rows are **not** auto-produced.
 
+## Studio one-click
+
+On the Idea tab, **Make video from Cliplytics** imports the next unused topic (highest-engagement `tiktok_ready` sidecar first) and starts `daily_pipeline.py --content CLX-…`. Astra writes a sourced script; the viral remix is kept in `core_fact` as unverified context, not as narration.
+
+**Queue topic only** imports the same row without producing.
+
+The UI reads `CLIPLYTICS_DIR` when set, otherwise:
+
+```
+C:\Users\Mauri\Documents\Python Projects\Cliplytics
+```
+
 ## Expected Cliplytics JSON
 
 `results/*.json` — array of VideoResult objects:

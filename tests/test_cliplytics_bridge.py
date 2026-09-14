@@ -14,9 +14,12 @@ from providers.cliplytics_bridge import (
     CONTENT_COLUMNS,
     IMPORT_STATUS,
     build_core_fact,
+    cliplytics_status,
     import_items,
+    import_next_topic,
     item_to_row,
     load_items,
+    load_ranked_unused,
     next_cliplytics_id,
     parse_payload,
     prefer_sidecars,
@@ -221,5 +224,37 @@ class CliTest(unittest.TestCase):
             self.assertEqual(ids, ["CLX-001", "CLX-002"])
 
 
+class NextTopicTest(unittest.TestCase):
+    def test_ranks_sidecar_ahead_of_results(self):
+        with TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "CONTENT.csv"
+            _seed_csv(csv_path)
+            unused, _skipped, error = load_ranked_unused(FIXTURES, csv_path)
+            self.assertIsNone(error)
+            self.assertEqual(unused[0].source_kind, "tiktok_ready")
+            self.assertEqual(unused[0].cliplytics_id, "tt-7123456789012345678")
+
+    def test_one_click_research_blanks_script(self):
+        with TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "CONTENT.csv"
+            _seed_csv(csv_path)
+            result = import_next_topic(FIXTURES, csv_path, research=True, now="2026-09-14 00:00:00")
+            self.assertEqual(len(result.imported), 1)
+            row = result.imported[0]
+            self.assertEqual(row["id"], "CLX-001")
+            self.assertEqual(row["script"], "")
+            self.assertEqual(row["script_version"], "0")
+            self.assertIn("not used as narration", row["core_fact"])
+            status = cliplytics_status(FIXTURES, csv_path)
+            self.assertEqual(status["unused"], 1)
+            self.assertEqual(status["next"]["kind"], "results")
+
+    def test_missing_folder_status(self):
+        status = cliplytics_status(Path("/definitely/not/cliplytics"), Path("CONTENT.csv"))
+        self.assertFalse(status["available"])
+        self.assertIsNone(status["next"])
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -169,7 +169,7 @@ python import_cliplytics.py --cliplytics-dir "C:\Users\Mauri\Documents\Python Pr
 python import_cliplytics.py --input "C:\Users\Mauri\Documents\Python Projects\Cliplytics\tiktok_ready\example.json" --write-config --dry-run
 ```
 
-See [docs/CLIPLYTICS_BRIDGE.md](docs/CLIPLYTICS_BRIDGE.md) for field mapping, schemas, and duplicate handling. Imported claims stay cited as Cliplytics/viral source text and still need independent research before production.
+In Studio, the Idea tab has **Make video from Cliplytics**: one click imports the next unused Cliplytics topic and produces a sourced short. See [docs/CLIPLYTICS_BRIDGE.md](docs/CLIPLYTICS_BRIDGE.md) for field mapping, schemas, and duplicate handling. Imported claims stay cited as Cliplytics/viral source text and still need independent research before production.
 
 ## Project Structure
 

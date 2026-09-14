@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -750,6 +751,7 @@ def import_items(
     write_config: bool = False,
     imports_root: Path | None = None,
     now: str | None = None,
+    research: bool = False,
 ) -> ImportResult:
     rows = load_content_rows(csv_path)
     fingerprints, urls, cliplytics_ids = index_existing(rows)
@@ -773,6 +775,17 @@ def import_items(
             continue
         content_id = next_cliplytics_id(rows + imported)
         row = item_to_row(item, content_id, stamp)
+        if research:
+            remix = row.get("script", "").strip()
+            if remix:
+                row["core_fact"] = (
+                    row["core_fact"].rstrip()
+                    + "\n\nCliplytics remix script (unverified; not used as narration):\n"
+                    + remix
+                    + "\n"
+                )
+            row["script"] = ""
+            row["script_version"] = "0"
         imported.append(row)
         accepted += 1
         fingerprints.add(item.fingerprint)
@@ -817,3 +830,122 @@ def format_summary(result: ImportResult) -> str:
     elif result.imported and result.dry_run:
         lines.append("  configs: not written (dry-run)")
     return "\n".join(lines)
+
+
+def resolve_cliplytics_dir(override: str | Path | None = None) -> Path:
+    if override:
+        return Path(override).expanduser()
+    env = os.environ.get("CLIPLYTICS_DIR", "").strip()
+    if env:
+        return Path(env).expanduser()
+    return DEFAULT_CLIPLYTICS_DIR
+
+
+def item_score(item: CliplyticsItem) -> tuple[int, float, float]:
+    sidecar = 1 if item.source_kind == "tiktok_ready" else 0
+    views = float(item.views or 0)
+    likes = float(item.likes or 0)
+    return (sidecar, views, likes)
+
+
+def preview_item(item: CliplyticsItem) -> dict[str, Any]:
+    return {
+        "cliplytics_id": item.cliplytics_id,
+        "topic": infer_topic(item),
+        "hook": infer_hook(item),
+        "author": item.author,
+        "url": item.url,
+        "views": item.views,
+        "likes": item.likes,
+        "kind": item.source_kind,
+    }
+
+
+def load_ranked_unused(
+    cliplytics_dir: Path,
+    csv_path: Path,
+) -> tuple[list[CliplyticsItem], list[SkipRecord], str | None]:
+    """Unused viable items, sidecars and higher engagement first."""
+    try:
+        paths = discover_paths(cliplytics_dir, None, "auto")
+    except FileNotFoundError as exc:
+        return [], [], str(exc)
+    if not paths:
+        return [], [], f"No Cliplytics JSON found under {cliplytics_dir}"
+    items, skipped = load_items(paths)
+    items, extra = prefer_sidecars(items)
+    skipped.extend(extra)
+    fingerprints, urls, cliplytics_ids = index_existing(load_content_rows(csv_path))
+    unused: list[CliplyticsItem] = []
+    for item in items:
+        reason = item_is_viable(item)
+        if reason:
+            skipped.append(SkipRecord(reason.split(":", 1)[0], item.source_path, reason))
+            continue
+        dup = duplicate_reason(item, fingerprints, urls, cliplytics_ids)
+        if dup:
+            skipped.append(SkipRecord(SKIP_DUPLICATE, item.source_path, dup))
+            continue
+        unused.append(item)
+    unused.sort(key=item_score, reverse=True)
+    return unused, skipped, None
+
+
+def cliplytics_status(
+    cliplytics_dir: Path | None = None,
+    csv_path: Path | None = None,
+) -> dict[str, Any]:
+    root = resolve_cliplytics_dir(cliplytics_dir)
+    csv_path = csv_path or Path("CONTENT.csv")
+    if not root.is_dir():
+        return {
+            "dir": str(root),
+            "available": False,
+            "unused": 0,
+            "next": None,
+            "error": f"Cliplytics folder not found: {root}",
+        }
+    unused, _skipped, error = load_ranked_unused(root, csv_path)
+    if error:
+        return {
+            "dir": str(root),
+            "available": True,
+            "unused": 0,
+            "next": None,
+            "error": error,
+        }
+    return {
+        "dir": str(root),
+        "available": True,
+        "unused": len(unused),
+        "next": preview_item(unused[0]) if unused else None,
+        "error": None if unused else "No unused Cliplytics topics left to import",
+    }
+
+
+def import_next_topic(
+    cliplytics_dir: Path,
+    csv_path: Path,
+    *,
+    research: bool = False,
+    write_config: bool = False,
+    imports_root: Path | None = None,
+    now: str | None = None,
+) -> ImportResult:
+    unused, skipped, error = load_ranked_unused(cliplytics_dir, csv_path)
+    if error:
+        raise FileNotFoundError(error)
+    if not unused:
+        raise RuntimeError("No unused Cliplytics topics to import")
+    result = import_items(
+        unused,
+        csv_path,
+        limit=1,
+        write_config=write_config,
+        imports_root=imports_root,
+        now=now,
+        research=research,
+    )
+    result.skipped = skipped + result.skipped
+    return result
+
