@@ -20,8 +20,8 @@ from pathlib import Path
 
 from providers.env import load_env
 from providers.costs import print_summary
-from providers.elevenlabs_tts import synthesize
-from providers.openai_research import hunt_viral_idea, research_topic, runway_prompts_for_script
+from providers.elevenlabs_tts import spoken_script, synthesize
+from providers.openai_research import detect_format, hunt_viral_idea, research_topic, runway_prompts_for_script
 from providers.youtube_upload import credentials_ready, youtube_title
 
 load_env()
@@ -232,7 +232,7 @@ def generate_config(content_row, narration_path=None, researched=None):
     """Generate a full pipeline config from a content row."""
     cid = content_row["id"]
     topic = content_row["topic"]
-    script = content_row["script"]
+    script = spoken_script(content_row["script"])
     core_fact = content_row.get("core_fact", "")
     researched = researched or load_research(cid)
 
@@ -324,7 +324,11 @@ def run_daily(content_id=None, narration_path=None):
     researched = load_research(cid)
     if not content_row.get("script", "").strip():
         print(f"\nResearching {cid} with GPT-6 Astra + web search...")
-        researched = research_topic(topic, content_row.get("core_fact", ""))
+        researched = research_topic(
+            topic,
+            content_row.get("core_fact", ""),
+            format=detect_format(topic, content_row.get("hook", "")),
+        )
         content_row = update_content_row(
             cid,
             hook=researched["hook"],
@@ -355,8 +359,11 @@ def run_daily(content_id=None, narration_path=None):
 
     if not narration_path or not Path(narration_path).exists():
         print(f"\nGenerating ElevenLabs narration for {cid}...")
-        (config_dir / "script.txt").write_text(content_row["script"])
-        narration_path = synthesize(content_row["script"], config_dir / "narration.wav", cid)
+        spoken = spoken_script(content_row["script"])
+        if spoken != (content_row.get("script") or "").strip():
+            content_row = update_content_row(cid, script=spoken)
+        (config_dir / "script.txt").write_text(spoken, encoding="utf-8")
+        narration_path = synthesize(spoken, config_dir / "narration.wav", cid)
         print(f"Narration saved: {narration_path}")
 
     config["narration_path"] = str(narration_path)
@@ -433,8 +440,13 @@ def enqueue_idea(idea: str, category: str = "", *, surprise: bool = False) -> di
     if not surprise and len(idea) < 8:
         raise ValueError("Tell it a little more — a sentence is enough.")
     rows = load_content_queue()
-    avoid = [r.get("topic", "") for r in rows[-30:]]
-    angle = hunt_viral_idea(idea, avoid=avoid)
+    avoid: list[str] = []
+    for row in rows[-30:]:
+        if row.get("topic"):
+            avoid.append(row["topic"])
+        if row.get("hook"):
+            avoid.append(row["hook"])
+    angle = hunt_viral_idea(idea, avoid=avoid, queue_size=len(rows))
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     fieldnames = list(rows[0].keys()) if rows else [
         "id", "topic", "category", "fingerprint", "hook", "core_fact", "script",
@@ -507,6 +519,9 @@ def list_queue():
 
 
 def list_videos() -> list[dict]:
+    from providers.youtube_upload import youtube_links
+
+    csv_urls = {row["id"]: row.get("video_uri", "") for row in load_content_queue()}
     out = []
     base = ROOT / "pipeline_output"
     if not base.exists():
@@ -526,11 +541,15 @@ def list_videos() -> list[dict]:
         for step in state.get("steps", []):
             if step.get("step") == "upload":
                 youtube = (step.get("youtube") or {}).get("url", "")
+        cid = cfg.get("content_id", folder.name)
+        links = youtube_links(youtube or csv_urls.get(cid, ""))
         mp4 = folder / cfg.get("output_name", f"somehow-true-{folder.name.lower()}.mp4")
         out.append({
-            "id": cfg.get("content_id", folder.name),
+            "id": cid,
             "title": cfg.get("title", folder.name),
-            "youtube": youtube,
+            "youtube": links["studio"] or youtube,
+            "watch": links["watch"],
+            "studio": links["studio"],
             "local": str(mp4) if mp4.exists() else "",
             "duration_seconds": (state.get("output_qa") or {}).get("duration_seconds"),
             "complete": bool(state.get("all_steps_complete")),

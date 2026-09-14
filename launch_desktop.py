@@ -1,9 +1,8 @@
-"""Windows exe entry. Starts the studio with visible errors if something is missing."""
+"""Windows exe entry. Hosts the studio in this process so the taskbar pin groups."""
 from __future__ import annotations
 
+import importlib.util
 import os
-import shutil
-import subprocess
 import sys
 import traceback
 from pathlib import Path
@@ -29,54 +28,39 @@ def repo_root() -> Path:
     )
 
 
-def python_bin(root: Path) -> str:
-    candidates: list[Path] = [
-        root / ".venv" / "Scripts" / "python.exe",
-        Path(r"C:\Python314\python.exe"),
-        Path(r"C:\Python313\python.exe"),
-        Path(r"C:\Python312\python.exe"),
-    ]
-    if not getattr(sys, "frozen", False):
-        candidates.insert(0, Path(sys.executable))
-    which = shutil.which("python")
-    if which:
-        candidates.append(Path(which))
-    for path in candidates:
-        if path and path.exists() and path.name.lower() != "somehowtrue.exe":
-            return str(path)
-    raise FileNotFoundError(
-        "Python was not found. Install Python 3 and retry.\n"
-        "The taskbar pin launches Python, which then opens the studio."
-    )
+def _attach_venv(root: Path) -> None:
+    sys.path.insert(0, str(root))
+    venv = root / ".venv"
+    scripts = venv / "Scripts"
+    site_packages = venv / "Lib" / "site-packages"
+    extras = [p for p in (scripts, venv / "DLLs", venv / "Library" / "bin") if p.exists()]
+    if extras:
+        os.environ["PATH"] = os.pathsep.join(str(p) for p in extras) + os.pathsep + os.environ.get("PATH", "")
+    if hasattr(os, "add_dll_directory"):
+        for folder in extras:
+            os.add_dll_directory(str(folder))
+    if site_packages.exists():
+        sys.path.insert(0, str(site_packages))
+        import site
+        site.addsitedir(str(site_packages))
+
+
+def _run_studio(root: Path) -> int:
+    os.chdir(root)
+    os.environ["SOMEHOW_TRUE_ROOT"] = str(root)
+    _attach_venv(root)
+    path = root / "desktop.py"
+    spec = importlib.util.spec_from_file_location("somehow_true_desktop", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return int(module.main() or 0)
 
 
 def main() -> int:
     try:
-        if sys.platform == "win32":
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SomehowTrue.Studio")
-        root = repo_root()
-        os.chdir(root)
-        py = python_bin(root)
-        log_path = root / "pipeline_output" / "studio-launch.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        creation = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0  # type: ignore[attr-defined]
-        with log_path.open("w", encoding="utf-8") as log:
-            log.write(f"root={root}\npython={py}\nexe={sys.executable}\n")
-            log.flush()
-            proc = subprocess.Popen(
-                [py, "-u", str(root / "desktop.py")],
-                cwd=str(root),
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                creationflags=creation,
-            )
-            code = proc.wait()
-        if code != 0:
-            detail = log_path.read_text(encoding="utf-8", errors="replace")[-1500:]
-            _message("Somehow True", f"Studio exited ({code}).\n\n{detail}")
-            return code
-        return 0
+        return _run_studio(repo_root())
     except Exception:
         _message("Somehow True", traceback.format_exc()[-1500:])
         return 1

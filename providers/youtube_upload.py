@@ -20,6 +20,31 @@ DEFAULT_CHANNEL_ID = "UCZqmUx29Va8Zud78Fj_0Geg"
 
 
 YOUTUBE_TITLE_LIMIT = 100
+YOUTUBE_URL_RE = re.compile(
+    r"https://(?:studio\.youtube\.com/video/([A-Za-z0-9_-]+)/edit"
+    r"|youtu\.be/([A-Za-z0-9_-]+)"
+    r"|(?:www\.)?youtube\.com/watch\?v=([A-Za-z0-9_-]+))"
+)
+
+
+def youtube_links(url: str = "", video_id: str = "") -> dict:
+    """Studio + watch URLs from a video id or any YouTube URL we print."""
+    found = (video_id or "").strip()
+    match = YOUTUBE_URL_RE.search(url or "")
+    if match:
+        found = next((group for group in match.groups() if group), found)
+    if not found and "/video/" in (url or ""):
+        found = url.split("/video/", 1)[1].split("/", 1)[0]
+    if not found:
+        return {"video_id": "", "studio": (url or "").strip(), "watch": "", "url": (url or "").strip()}
+    studio = f"https://studio.youtube.com/video/{found}/edit"
+    watch = f"https://youtu.be/{found}"
+    return {"video_id": found, "studio": studio, "watch": watch, "url": studio}
+
+
+def extract_youtube_url(text: str) -> str:
+    match = YOUTUBE_URL_RE.search(text or "")
+    return match.group(0) if match else ""
 
 
 def youtube_title(text: str, limit: int = YOUTUBE_TITLE_LIMIT) -> str:

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import sys
+import webbrowser
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -21,6 +23,19 @@ class IdeaRequest(BaseModel):
 
 class ProduceIdRequest(BaseModel):
     content_id: str
+
+
+class LinkRequest(BaseModel):
+    url: str = ""
+    text: str = ""
+
+
+YOUTUBE_PREFIXES = (
+    "https://studio.youtube.com/",
+    "https://youtu.be/",
+    "https://www.youtube.com/",
+    "https://youtube.com/",
+)
 
 
 def _desktop() -> bool:
@@ -47,9 +62,9 @@ def dashboard():
     jobs = list_jobs()
     return {
         "queue": queue,
-        "videos": videos[:12],
+        "videos": videos[:24],
         "spend": spend,
-        "jobs": jobs[:8],
+        "jobs": jobs[:12],
         "youtube_ready": credentials_ready(),
         "credits_per_video": 540,
         "usd_per_video": 5.40,
@@ -116,6 +131,50 @@ def api_produce(req: ProduceIdRequest):
         extra={"kind": "produce", "content_id": cid},
     )
     return {"job": job}
+
+
+def _copy_text(text: str) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("Clipboard is only wired on Windows")
+    import ctypes
+
+    cf_unicode = 13
+    gmem_moveable = 0x0002
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    if not user32.OpenClipboard(None):
+        raise RuntimeError("Clipboard is busy")
+    try:
+        user32.EmptyClipboard()
+        payload = text.encode("utf-16-le") + b"\x00\x00"
+        handle = kernel32.GlobalAlloc(gmem_moveable, len(payload))
+        locked = kernel32.GlobalLock(handle)
+        ctypes.memmove(locked, payload, len(payload))
+        kernel32.GlobalUnlock(handle)
+        user32.SetClipboardData(cf_unicode, handle)
+    finally:
+        user32.CloseClipboard()
+
+
+@router.post("/open")
+def api_open(req: LinkRequest):
+    url = (req.url or "").strip()
+    if not url.startswith(YOUTUBE_PREFIXES):
+        raise HTTPException(400, "Only YouTube links can be opened from here.")
+    webbrowser.open(url)
+    return {"ok": True}
+
+
+@router.post("/copy")
+def api_copy(req: LinkRequest):
+    text = (req.text or req.url or "").strip()
+    if not text:
+        raise HTTPException(400, "Nothing to copy.")
+    try:
+        _copy_text(text)
+    except Exception as exc:
+        raise HTTPException(500, f"Could not copy: {exc}") from exc
+    return {"ok": True}
 
 
 @router.get("/settings")

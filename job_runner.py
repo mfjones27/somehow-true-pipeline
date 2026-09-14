@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from providers.env import ROOT
+from providers.youtube_upload import extract_youtube_url, youtube_links
 
 JOBS: dict[str, dict] = {}
 _LOCK = threading.Lock()
@@ -85,6 +86,10 @@ def snapshot(job_id: str) -> dict | None:
     out = dict(job)
     if out["status"] == "running":
         out["elapsed_seconds"] = round(time.time() - out["started_at"], 1)
+    raw = extract_youtube_url(f"{out.get('log') or ''}\n{out.get('result') or ''}")
+    links = youtube_links(raw)
+    out["youtube"] = links["studio"]
+    out["watch"] = links["watch"]
     return out
 
 
