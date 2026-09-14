@@ -149,6 +149,40 @@ export default function App() {
     await go();
   }
 
+  async function submitCliplytics({ produce = true } = {}) {
+    const next = dash?.cliplytics?.next;
+    const go = async () => {
+      setBusy(true);
+      setError("");
+      try {
+        const result = await api("/api/cliplytics", {
+          method: "POST",
+          body: JSON.stringify({ produce }),
+        });
+        if (result.job?.id) {
+          setActiveJob(result.job.id);
+          setPage("jobs");
+        } else {
+          setPage("queue");
+        }
+        await refresh();
+      } catch (err) {
+        setError(String(err.message || err));
+      } finally {
+        setBusy(false);
+      }
+    };
+    if (produce) {
+      const topic = next?.hook || next?.topic || "the next unused Cliplytics topic";
+      ask(
+        `Import “${topic}” from Cliplytics and make the video? Astra will source a script — viral claims are not used as narration. About 540 Runway credits (~$5.40).`,
+        go,
+      );
+      return;
+    }
+    await go();
+  }
+
   async function produceId(contentId, { continueWork = false, skipCaptions = false } = {}) {
     const message = continueWork
       ? `Finish ${contentId} from clips already on disk? No new Runway generation unless a fill clip is needed.`
@@ -281,6 +315,51 @@ export default function App() {
               </button>
             </div>
             <p className="hint">Full short ≈ 540 Runway credits / $5.40. Uploads private with the AI label.</p>
+          </section>
+        )}
+
+        {page === "idea" && (
+          <section className="hero cliplytics-hero">
+            <h2>Or pull a viral Cliplytics topic.</h2>
+            <p>
+              One click reads the next unused remix from your local Cliplytics folder,
+              then Astra hunts a sourced Somehow True angle and produces the short.
+            </p>
+            {dash?.cliplytics?.next ? (
+              <div className="topic-preview">
+                <p className="kicker">Next unused</p>
+                <strong>{dash.cliplytics.next.hook || dash.cliplytics.next.topic}</strong>
+                <p className="hint">
+                  {dash.cliplytics.next.author ? `@${dash.cliplytics.next.author}` : "Cliplytics"}
+                  {dash.cliplytics.next.views != null ? ` · ${Number(dash.cliplytics.next.views).toLocaleString()} views` : ""}
+                  {` · ${dash.cliplytics.unused} unused`}
+                </p>
+              </div>
+            ) : (
+              <p className="hint">
+                {dash?.cliplytics?.error
+                  || "Looking for Cliplytics…"}
+                {dash?.cliplytics?.dir ? ` (${dash.cliplytics.dir})` : ""}
+              </p>
+            )}
+            <div className="row">
+              <button
+                className="primary"
+                disabled={busy || !dash?.cliplytics?.next}
+                onClick={() => submitCliplytics()}
+                type="button"
+              >
+                {busy ? "Working…" : "Make video from Cliplytics"}
+              </button>
+              <button
+                className="ghost"
+                disabled={busy || !dash?.cliplytics?.next}
+                onClick={() => submitCliplytics({ produce: false })}
+                type="button"
+              >
+                Queue topic only
+              </button>
+            </div>
           </section>
         )}
 
