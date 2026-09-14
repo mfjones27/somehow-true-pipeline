@@ -21,33 +21,30 @@ button { cursor: pointer; }
 h1, h2, h3, .mark { font-family: Fraunces, "Iowan Old Style", Palatino, Georgia, serif; font-weight: 500; }
 
 .app {
-  display: grid;
-  grid-template-columns: 232px 1fr;
+  display: flex;
+  flex-direction: column;
   min-height: 100%;
   background:
     radial-gradient(1200px 500px at 80% -10%, rgba(228, 194, 122, 0.08), transparent 55%),
     var(--bg);
 }
 
-aside {
+.chrome {
   display: flex;
-  flex-direction: column;
-  gap: 28px;
-  padding: 28px 18px 20px;
-  border-right: 1px solid var(--line);
+  align-items: center;
+  gap: 22px;
+  padding: 14px 28px;
+  border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, #14110d 0%, #0d0b09 100%);
 }
-.brand { display: flex; gap: 12px; align-items: center; }
-.mark {
-  width: 42px;
-  height: 42px;
-  border: 1px solid var(--gold);
+.brand { display: flex; gap: 12px; align-items: center; min-width: 180px; }
+.brand img {
+  width: 40px;
+  height: 40px;
   border-radius: 12px;
-  display: grid;
-  place-items: center;
-  color: var(--gold);
-  margin: 0;
-  letter-spacing: 0.04em;
+  border: 1px solid var(--gold);
+  object-fit: cover;
+  background: #0b0907;
 }
 .eyebrow {
   letter-spacing: 0.28em;
@@ -58,35 +55,53 @@ aside {
 }
 .brand strong { font-size: 18px; font-weight: 500; }
 
-nav { display: grid; gap: 6px; }
-nav button, .row button, table button, .jobs button, .linkbar button {
+.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.tabs button, .row button, table button, .jobs button, .linkbar button {
   background: transparent;
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 9px 14px;
 }
-nav button {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 100%;
-  text-align: left;
-  border-radius: 12px;
+.tabs button {
+  border: 0;
   color: var(--muted);
+  padding: 8px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: background 180ms ease, color 180ms ease, transform 180ms ease;
 }
-nav button.on, .jobs button.on {
-  border-color: var(--gold);
-  color: var(--gold-2);
-  background: rgba(228, 194, 122, 0.08);
-}
-nav em {
-  font-style: normal;
+.tabs button:hover { color: var(--ink); }
+.tabs button.on {
   background: var(--gold);
   color: #1a1408;
+}
+.tabs em {
+  font-style: normal;
+  background: #1a1408;
+  color: var(--gold);
   border-radius: 99px;
   padding: 0 7px;
   font-size: 12px;
 }
+.tabs button.on em { background: #1a1408; color: var(--gold-2); }
+.chrome-meta {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.chrome-meta p { margin: 0; }
+
 .aside-foot { margin-top: auto; color: var(--muted); font-size: 13px; }
 .aside-foot p { margin: 0 0 4px; }
 
@@ -171,6 +186,15 @@ th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--lin
   gap: 8px;
   align-items: center;
 }
+.jobs button.on {
+  border-color: var(--gold);
+  color: var(--gold-2);
+  background: rgba(228, 194, 122, 0.08);
+}
+.spend-chip { color: var(--muted); margin: 0; }
+.pill.privacy-public { color: var(--ok); border-color: #335e3a; }
+.pill.privacy-private { color: var(--gold); border-color: var(--gold); }
+.pill.privacy-unlisted { color: var(--muted); }
 .log pre {
   white-space: pre-wrap;
   background: #0a0908;
@@ -240,7 +264,7 @@ th, td { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--lin
 .modal p { margin: 0 0 16px; line-height: 1.45; }
 
 @media (max-width: 980px) {
-  .app, .grid, .split, .linkbar { display: block; }
-  aside { border-right: 0; border-bottom: 1px solid var(--line); }
+  .chrome { flex-wrap: wrap; }
+  .grid, .split, .linkbar { display: block; }
   .linkbar button { margin-top: 8px; }
 }

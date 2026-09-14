@@ -99,10 +99,53 @@ FONT = resolve_font()
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
+def _subprocess_kwargs():
+    kwargs = {}
+    if os.name == "nt":
+        flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        flags |= getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flags:
+            kwargs["creationflags"] = flags
+    return kwargs
+
+
+def ffmpeg_output_path(args):
+    for item in reversed(args):
+        text = str(item)
+        if text.startswith("-"):
+            continue
+        return Path(text)
+    return None
+
+
+def ffmpeg_terminated_cleanly(result) -> bool:
+    stderr = result.stderr or ""
+    if "received signal 15" in stderr:
+        return True
+    return result.returncode in {15, 255, -15, 4294967281, 0xC000013A}
+
+
+def ffmpeg_output_usable(path: Path) -> bool:
+    if path is None or not path.exists() or path.stat().st_size < 50_000:
+        return False
+    try:
+        data = json.loads(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
+            **_subprocess_kwargs(),
+        ).stdout)
+        video = any(stream.get("codec_type") == "video" for stream in data.get("streams") or [])
+        duration = float((data.get("format") or {}).get("duration") or 0)
+        return video and duration > 1
+    except Exception:
+        return False
+
+
 def run(args, log=None, timeout=600, cwd=None):
     result = subprocess.run(
         [str(a) for a in args], stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, timeout=timeout, cwd=cwd,
+        **_subprocess_kwargs(),
     )
     if log:
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +156,21 @@ def run(args, log=None, timeout=600, cwd=None):
 
 
 def ffmpeg(args, log=None, timeout=600, cwd=None):
-    return run(["ffmpeg", "-hide_banner", "-y", "-threads", "2", *args], log, timeout, cwd=cwd)
+    cmd = ["ffmpeg", "-hide_banner", "-y", "-threads", "2", *[str(a) for a in args]]
+    result = subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        timeout=timeout, cwd=cwd, **_subprocess_kwargs(),
+    )
+    if log:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(result.stderr)
+    if result.returncode:
+        output = ffmpeg_output_path(args)
+        if ffmpeg_terminated_cleanly(result) and ffmpeg_output_usable(output):
+            print(f"  ffmpeg exited {result.returncode} after a usable file at {output}")
+            return result
+        raise RuntimeError(f"Command failed ({result.returncode}): {cmd}\n{result.stderr[-4000:]}")
+    return result
 
 
 def ffprobe(path):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -115,6 +116,51 @@ def credentials_ready() -> bool:
         os.environ.get(name, "").strip()
         for name in ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOKEN")
     )
+
+
+_POSTED_CACHE = {"at": 0.0, "items": []}
+
+
+def list_posted_videos(limit: int = 24) -> list[dict]:
+    """Videos that still exist on the channel, with live privacy. Skips deleted ones."""
+    if not credentials_ready():
+        return []
+    now = time.time()
+    if _POSTED_CACHE["items"] and now - _POSTED_CACHE["at"] < 90:
+        return _POSTED_CACHE["items"][:limit]
+    try:
+        youtube = build("youtube", "v3", credentials=_credentials())
+        channel = assert_channel(youtube)
+        listed = youtube.channels().list(part="contentDetails", mine=True).execute()
+        items = listed.get("items") or []
+        if not items:
+            return []
+        playlist = items[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        found = youtube.playlistItems().list(
+            part="contentDetails", playlistId=playlist, maxResults=min(limit, 50),
+        ).execute()
+        ids = [row["contentDetails"]["videoId"] for row in found.get("items") or []]
+        if not ids:
+            _POSTED_CACHE.update({"at": now, "items": []})
+            return []
+        videos = youtube.videos().list(part="snippet,status", id=",".join(ids)).execute()
+        out = []
+        for video in videos.get("items") or []:
+            video_id = video["id"]
+            links = youtube_links(video_id=video_id)
+            out.append({
+                "id": video_id,
+                "title": video.get("snippet", {}).get("title", video_id),
+                "privacy": video.get("status", {}).get("privacyStatus", "private"),
+                "studio": links["studio"],
+                "watch": links["watch"],
+                "youtube": links["studio"],
+                "channel_id": channel["id"],
+            })
+        _POSTED_CACHE.update({"at": now, "items": out})
+        return out[:limit]
+    except Exception:
+        return _POSTED_CACHE["items"][:limit]
 
 
 def _credentials() -> Credentials:

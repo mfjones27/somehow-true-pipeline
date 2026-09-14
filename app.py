@@ -70,24 +70,21 @@ def _local(request: Request) -> bool:
 
 
 def _open_path(path: str) -> bool:
-    if path in {"/", "/health", "/api/health", "/index.html"}:
+    if path in {"/", "/health", "/api/health", "/index.html", "/logo.png", "/favicon.ico"}:
         return True
     if path.startswith("/assets/") or path.startswith("/api/"):
         return path.startswith("/assets/") or (path == "/api/health")
-    return path.endswith((".js", ".css", ".ico", ".svg", ".woff2", ".map", ".webmanifest"))
+    return path.endswith((".js", ".css", ".ico", ".svg", ".png", ".woff2", ".map", ".webmanifest"))
 
 
 @app.middleware("http")
 async def deployment_guard(request: Request, call_next):
     """Fail closed on Railway. The local desktop app is allowed through."""
     path = request.url.path.rstrip("/") or "/"
-    if request.method == "OPTIONS" or path == "/health" or _open_path(path):
-        if path in {"/", "/health"} or path.startswith("/assets/") or path.endswith(
-            (".js", ".css", ".ico", ".svg", ".woff2", ".map")
-        ):
-            return await call_next(request)
-        if path == "/api/health":
-            return await call_next(request)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if request.method == "GET" and _open_path(path):
+        return await call_next(request)
 
     if _desktop() and _local(request):
         return await call_next(request)
@@ -99,12 +96,11 @@ async def deployment_guard(request: Request, call_next):
         or scheme.lower() != "bearer"
         or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
     ):
-        if path.startswith("/api/") or path.startswith("/produce") or path.startswith("/queue") or path.startswith("/jobs"):
-            return JSONResponse(
-                {"detail": "Unauthorized"},
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
-            )
+        return JSONResponse(
+            {"detail": "Unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     producing = path.startswith("/produce") or (
         request.method == "POST" and path.startswith("/api/")
@@ -285,6 +281,17 @@ if UI_DIST.exists():
     assets = UI_DIST / "assets"
     if assets.exists():
         app.mount("/assets", StaticFiles(directory=assets), name="ui-assets")
+
+
+@app.get("/logo.png")
+async def spa_logo():
+    path = UI_DIST / "logo.png"
+    if path.exists():
+        return FileResponse(path)
+    src = ROOT / "ui" / "public" / "logo.png"
+    if src.exists():
+        return FileResponse(src)
+    return JSONResponse({"detail": "logo missing"}, status_code=404)
 
 
 if __name__ == "__main__":

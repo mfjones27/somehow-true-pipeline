@@ -26,6 +26,8 @@ pipeline_output/
 *.png
 *.jpg
 !pipeline_output/.gitkeep
+!ui/src/logo.png
+!ui/public/logo.png
 
 # OS
 .DS_Store

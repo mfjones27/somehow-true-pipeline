@@ -293,7 +293,7 @@ def generate_config(content_row, narration_path=None, researched=None):
     return config
 
 
-def run_daily(content_id=None, narration_path=None):
+def run_daily(content_id=None, narration_path=None, skip_runway=False, skip_captions=False):
     """Main entry point for the daily pipeline."""
     print(f"\n{'='*60}")
     print("DAILY AUTOMATED PIPELINE")
@@ -371,6 +371,10 @@ def run_daily(content_id=None, narration_path=None):
 
     print("\nRunning produce_video.py...")
     cmd = [sys.executable, str(ROOT / "produce_video.py"), "--config", str(config_path)]
+    if skip_runway:
+        cmd.append("--skip-runway")
+    if skip_captions:
+        cmd.append("--skip-captions")
     should_upload = credentials_ready()
     if should_upload:
         cmd.append("--upload")
@@ -473,6 +477,28 @@ def enqueue_idea(idea: str, category: str = "", *, surprise: bool = False) -> di
     return {**row, "angle": angle["angle"]}
 
 
+def local_work(cid: str) -> dict:
+    folder = ROOT / "pipeline_output" / cid
+    clips = []
+    if (folder / "clips").is_dir():
+        clips = sorted((folder / "clips").glob("scene[0-9][0-9].mp4"))
+    config = {}
+    cfg_path = folder / "config.json"
+    if cfg_path.exists():
+        config = json.loads(cfg_path.read_text(encoding="utf-8"))
+    mp4 = folder / config.get("output_name", f"somehow-true-{cid.lower()}.mp4")
+    return {
+        "clips": len(clips),
+        "has_clips": bool(clips),
+        "has_captions": (folder / "captions" / "captions.ass").exists(),
+        "has_narration": (folder / "narration.wav").exists(),
+        "has_video": mp4.exists(),
+        "local": str(mp4) if mp4.exists() else "",
+        "title": config.get("title", ""),
+        "can_continue": bool(clips),
+    }
+
+
 def queue_snapshot() -> dict:
     rows = load_content_queue()
     log = load_produced_log()
@@ -481,6 +507,7 @@ def queue_snapshot() -> dict:
     items = []
     for row in rows:
         cid = row["id"]
+        work = local_work(cid)
         items.append({
             "id": cid,
             "topic": row.get("topic", ""),
@@ -488,16 +515,17 @@ def queue_snapshot() -> dict:
             "hook": row.get("hook", ""),
             "status": row.get("status", ""),
             "has_script": bool(row.get("script", "").strip()),
-            "produced": cid in produced or bool(str(row.get("video_uri", "")).strip()),
-            "failed": cid in failed,
+            "produced": cid in produced or str(row.get("video_uri", "")).startswith("https://"),
+            "failed": cid in failed and cid not in produced,
             "video_uri": row.get("video_uri", ""),
+            **work,
         })
     ready = sum(1 for item in items if not item["produced"])
     return {
         "rows": items,
         "ready": ready,
         "produced": sum(1 for item in items if item["produced"]),
-        "failed": len(failed),
+        "failed": sum(1 for item in items if item["failed"]),
         "total": len(items),
     }
 
@@ -518,10 +546,11 @@ def list_queue():
     print(f"{snap['produced']} already produced, {snap['failed']} failed")
 
 
-def list_videos() -> list[dict]:
-    from providers.youtube_upload import youtube_links
-
-    csv_urls = {row["id"]: row.get("video_uri", "") for row in load_content_queue()}
+def list_local_projects() -> list[dict]:
+    """Local pipeline folders: drafts, failed jobs, and unfinished muxes."""
+    log = load_produced_log()
+    produced = set(log.get("produced", []))
+    failed = set(log.get("failed", []))
     out = []
     base = ROOT / "pipeline_output"
     if not base.exists():
@@ -533,28 +562,27 @@ def list_videos() -> list[dict]:
         if not cfg_path.exists():
             continue
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        state = {}
-        state_path = folder / "pipeline_state.json"
-        if state_path.exists():
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        youtube = ""
-        for step in state.get("steps", []):
-            if step.get("step") == "upload":
-                youtube = (step.get("youtube") or {}).get("url", "")
         cid = cfg.get("content_id", folder.name)
-        links = youtube_links(youtube or csv_urls.get(cid, ""))
-        mp4 = folder / cfg.get("output_name", f"somehow-true-{folder.name.lower()}.mp4")
+        work = local_work(cid)
+        if cid in produced:
+            stage = "produced"
+        elif cid in failed:
+            stage = "failed"
+        elif work["has_clips"]:
+            stage = "in progress"
+        else:
+            stage = "draft"
         out.append({
             "id": cid,
             "title": cfg.get("title", folder.name),
-            "youtube": links["studio"] or youtube,
-            "watch": links["watch"],
-            "studio": links["studio"],
-            "local": str(mp4) if mp4.exists() else "",
-            "duration_seconds": (state.get("output_qa") or {}).get("duration_seconds"),
-            "complete": bool(state.get("all_steps_complete")),
+            "stage": stage,
+            **work,
         })
     return out
+
+
+def list_videos() -> list[dict]:
+    return list_local_projects()
 
 
 def main():
@@ -563,6 +591,8 @@ def main():
     parser.add_argument("--idea", help="Sharpen a freeform idea with Astra, then produce")
     parser.add_argument("--surprise", action="store_true", help="Let Astra pick a viral fact, then produce")
     parser.add_argument("--narration", help="Path to narration WAV file")
+    parser.add_argument("--skip-runway", action="store_true", help="Reuse existing Runway clips")
+    parser.add_argument("--skip-captions", action="store_true", help="Reuse existing captions")
     parser.add_argument("--list", action="store_true", help="Show queue status")
     args = parser.parse_args()
 
@@ -576,7 +606,7 @@ def main():
         print(f"Angle: {row.get('angle', '')}")
         return run_daily(row["id"], args.narration)
 
-    return run_daily(args.content, args.narration)
+    return run_daily(args.content, args.narration, args.skip_runway, args.skip_captions)
 
 
 if __name__ == "__main__":

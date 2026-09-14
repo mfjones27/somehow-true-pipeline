@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from job_runner import list_jobs, snapshot, start_job
 from providers.costs import summarize
 from providers.env import ROOT
-from providers.youtube_upload import credentials_ready
+from providers.youtube_upload import credentials_ready, list_posted_videos
 
 router = APIRouter(prefix="/api")
 
@@ -23,6 +23,8 @@ class IdeaRequest(BaseModel):
 
 class ProduceIdRequest(BaseModel):
     content_id: str
+    skip_runway: bool = False
+    skip_captions: bool = False
 
 
 class LinkRequest(BaseModel):
@@ -54,17 +56,15 @@ def api_health():
 
 @router.get("/dashboard")
 def dashboard():
-    from daily_pipeline import list_videos, queue_snapshot
+    from daily_pipeline import list_local_projects, queue_snapshot
 
     queue = queue_snapshot()
-    videos = list_videos()
-    spend = summarize()
-    jobs = list_jobs()
     return {
         "queue": queue,
-        "videos": videos[:24],
-        "spend": spend,
-        "jobs": jobs[:12],
+        "projects": list_local_projects()[:24],
+        "videos": list_posted_videos()[:24],
+        "spend": summarize(),
+        "jobs": list_jobs()[:12],
         "youtube_ready": credentials_ready(),
         "credits_per_video": 540,
         "usd_per_video": 5.40,
@@ -79,8 +79,7 @@ def api_queue():
 
 @router.get("/videos")
 def api_videos():
-    from daily_pipeline import list_videos
-    return {"videos": list_videos()}
+    return {"videos": list_posted_videos()}
 
 
 @router.get("/costs")
@@ -125,11 +124,13 @@ def api_produce(req: ProduceIdRequest):
     cid = req.content_id.strip()
     if not cid:
         raise HTTPException(400, "content_id required")
-    job = start_job(
-        f"Produce {cid}",
-        [str(ROOT / "daily_pipeline.py"), "--content", cid],
-        extra={"kind": "produce", "content_id": cid},
-    )
+    args = [str(ROOT / "daily_pipeline.py"), "--content", cid]
+    if req.skip_runway:
+        args.append("--skip-runway")
+    if req.skip_captions:
+        args.append("--skip-captions")
+    label = f"Continue {cid}" if req.skip_runway else f"Produce {cid}"
+    job = start_job(label, args, extra={"kind": "produce", "content_id": cid})
     return {"job": job}
 
 

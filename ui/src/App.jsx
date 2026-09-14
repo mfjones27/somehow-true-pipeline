@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import logo from "./logo.png";
 
 async function api(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
@@ -148,13 +149,20 @@ export default function App() {
     await go();
   }
 
-  async function produceId(contentId) {
-    ask(`Produce ${contentId}? About 540 Runway credits.`, async () => {
+  async function produceId(contentId, { continueWork = false, skipCaptions = false } = {}) {
+    const message = continueWork
+      ? `Finish ${contentId} from clips already on disk? No new Runway generation unless a fill clip is needed.`
+      : `Produce ${contentId}? About 540 Runway credits.`;
+    ask(message, async () => {
       setBusy(true);
       try {
         const result = await api("/api/produce", {
           method: "POST",
-          body: JSON.stringify({ content_id: contentId }),
+          body: JSON.stringify({
+            content_id: contentId,
+            skip_runway: continueWork,
+            skip_captions: continueWork && skipCaptions,
+          }),
         });
         if (result.job?.id) {
           setActiveJob(result.job.id);
@@ -210,15 +218,15 @@ export default function App() {
 
   return (
     <div className="app">
-      <aside>
+      <header className="chrome">
         <div className="brand">
-          <p className="mark">ST</p>
+          <img src={logo} alt="Somehow True" width="40" height="40" />
           <div>
             <p className="eyebrow">Somehow True</p>
             <strong>Studio</strong>
           </div>
         </div>
-        <nav>
+        <nav className="tabs" aria-label="Studio">
           {NAV.map(([id, label]) => (
             <button
               key={id}
@@ -226,16 +234,16 @@ export default function App() {
               onClick={() => setPage(id)}
               type="button"
             >
-              <span>{label}</span>
+              {label}
               {id === "jobs" && running.length ? <em>{running.length}</em> : null}
             </button>
           ))}
         </nav>
-        <div className="aside-foot">
+        <div className="chrome-meta">
+          {running.length ? <span className="live">{running.length} running</span> : <span className="idle">Idle</span>}
           <p>{dash?.youtube_ready ? "YouTube ready" : "YouTube not signed in"}</p>
-          <p>${(dash?.spend?.usd || 0).toFixed(2)} spent</p>
         </div>
-      </aside>
+      </header>
 
       <main>
         <header className="top">
@@ -243,7 +251,7 @@ export default function App() {
             <p className="kicker">{page}</p>
             <h1>{title}</h1>
           </div>
-          {running.length ? <span className="live">{running.length} running</span> : <span className="idle">Idle</span>}
+          <p className="spend-chip">${(dash?.spend?.usd || 0).toFixed(2)} spent</p>
         </header>
 
         {error ? <p className="banner">{error}</p> : null}
@@ -280,13 +288,18 @@ export default function App() {
           <section className="stack">
             <div className="grid">
               <Stat label="In queue" value={dash.queue.ready} />
-              <Stat label="Produced" value={dash.queue.produced} />
+              <Stat label="Failed" value={dash.queue.failed} />
               <Stat label="Runway credits" value={Math.round(dash.spend.runway_credits || 0)} />
               <Stat label="API spend" value={`$${(dash.spend.usd || 0).toFixed(2)}`} />
             </div>
             <div className="panel">
-              <h3>Latest videos</h3>
-              <VideoList videos={dash.videos} onCopy={copyText} onOpen={openUrl} />
+              <h3>Local work</h3>
+              <p className="hint">Drafts and failed jobs stay here. Posted YouTube videos live on Videos.</p>
+              <ProjectList
+                projects={dash.projects}
+                busy={busy}
+                onContinue={(item) => produceId(item.id, { continueWork: true, skipCaptions: item.has_captions })}
+              />
             </div>
           </section>
         )}
@@ -309,12 +322,22 @@ export default function App() {
                     <td className="mono">{row.id}</td>
                     <td>{row.hook || row.topic}</td>
                     <td>
-                      <span className={`pill ${row.produced ? "done" : ""}`}>
-                        {row.produced ? "done" : row.status}
+                      <span className={`pill ${row.produced ? "done" : row.failed ? "failed" : ""}`}>
+                        {row.produced ? "done" : row.failed ? "failed" : row.status}
                       </span>
+                      {row.has_clips ? <span className="pill">{row.clips} clips</span> : null}
                     </td>
                     <td>
-                      {row.produced ? null : (
+                      {row.produced ? null : row.can_continue ? (
+                        <button
+                          className="primary"
+                          disabled={busy}
+                          onClick={() => produceId(row.id, { continueWork: true, skipCaptions: row.has_captions })}
+                          type="button"
+                        >
+                          Continue
+                        </button>
+                      ) : (
                         <button disabled={busy} onClick={() => produceId(row.id)} type="button">
                           Produce
                         </button>
@@ -363,7 +386,8 @@ export default function App() {
 
         {page === "videos" && dash && (
           <section className="panel">
-            <h3>Videos</h3>
+            <h3>On YouTube</h3>
+            <p className="hint">Live from the channel. Deleted videos disappear here after refresh.</p>
             <VideoList videos={dash.videos} onCopy={copyText} onOpen={openUrl} />
           </section>
         )}
@@ -455,26 +479,49 @@ function LinkBar({ studio, watch, onCopy, onOpen }) {
   );
 }
 
+function ProjectList({ projects, busy, onContinue }) {
+  if (!projects?.length) return <p className="hint">Nothing on disk yet.</p>;
+  return (
+    <ul className="videos">
+      {projects.map((item) => (
+        <li key={item.id}>
+          <div className="video-head">
+            <strong>{item.title || item.id}</strong>
+            <span className="mono">{item.id}</span>
+          </div>
+          <div className="row">
+            <span className={`pill ${item.stage === "failed" ? "failed" : item.stage === "produced" ? "done" : ""}`}>
+              {item.stage}
+            </span>
+            {item.has_clips ? <span className="pill">{item.clips} clips</span> : null}
+            {item.can_continue && item.stage !== "produced" ? (
+              <button className="primary" disabled={busy} type="button" onClick={() => onContinue(item)}>
+                Continue
+              </button>
+            ) : null}
+          </div>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function VideoList({ videos, onCopy, onOpen }) {
-  if (!videos?.length) return <p className="hint">Nothing rendered yet.</p>;
+  if (!videos?.length) return <p className="hint">No videos currently on the YouTube channel.</p>;
   return (
     <ul className="videos">
       {videos.map((video) => (
         <li key={video.id}>
           <div className="video-head">
             <strong>{video.title}</strong>
-            <span className="mono">{video.id}</span>
+            <span className={`pill privacy-${video.privacy || "private"}`}>{video.privacy || "private"}</span>
           </div>
-          {video.youtube || video.watch || video.studio ? (
-            <LinkBar
-              studio={video.studio || video.youtube}
-              watch={video.watch}
-              onCopy={onCopy}
-              onOpen={onOpen}
-            />
-          ) : (
-            <p className="hint">local only</p>
-          )}
+          <LinkBar
+            studio={video.studio || video.youtube}
+            watch={video.watch}
+            onCopy={onCopy}
+            onOpen={onOpen}
+          />
         </li>
       ))}
     </ul>
