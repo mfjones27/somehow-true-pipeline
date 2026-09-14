@@ -1,0 +1,36 @@
+[
+  {
+    "id": "yt-dQwFinanceExample",
+    "url": "https://www.youtube.com/watch?v=dQwFinanceExample",
+    "platform": "youtube",
+    "metadata": {
+      "id": "yt-dQwFinanceExample",
+      "platform": "youtube",
+      "url": "https://www.youtube.com/watch?v=dQwFinanceExample",
+      "author": "MarketClips",
+      "caption": "This inflation chart will shock you. #inflation #economy",
+      "hashtags": ["inflation", "economy"],
+      "likes": 92000,
+      "views": 1100000,
+      "comments": 4100,
+      "shares": 800,
+      "duration_s": 41.0,
+      "posted_at": "2026-08-01T00:00:00Z"
+    },
+    "video_path": "downloads/yt-dQwFinanceExample.mp4",
+    "transcript": "The creator claims grocery prices doubled while wages stayed flat.",
+    "analysis": {
+      "summary": "A short claims grocery prices doubled while wages stayed flat, framed as an inflation shock.",
+      "topics": ["economy"],
+      "sentiment": "alarmed",
+      "key_takeaways": [
+        "Creator asserts grocery prices doubled.",
+        "Creator asserts wages did not keep up."
+      ],
+      "target_audience": "personal-finance viewers",
+      "virality_factors": ["shock hook", "chart screenshot"]
+    },
+    "script": null,
+    "error": null
+  }
+]

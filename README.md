@@ -160,15 +160,29 @@ docs, startup and port handling. They do not execute the media pipeline.
   commands. Resolve these blockers, implement fail-closed approval controls, and
   obtain explicit authorization before changing `PIPELINE_ENABLED` to `true`.
 
+## Cliplytics import
+
+Cliplytics is a separate local scraper/remix tool. This repo does not clone it. To turn its `results/*.json` or `tiktok_ready/<slug>.json` files into `CONTENT.csv` rows (`CLX-*`, status `Needs research`):
+
+```bat
+python import_cliplytics.py --cliplytics-dir "C:\Users\Mauri\Documents\Python Projects\Cliplytics"
+python import_cliplytics.py --input "C:\Users\Mauri\Documents\Python Projects\Cliplytics\tiktok_ready\example.json" --write-config --dry-run
+```
+
+See [docs/CLIPLYTICS_BRIDGE.md](docs/CLIPLYTICS_BRIDGE.md) for field mapping, schemas, and duplicate handling. Imported claims stay cited as Cliplytics/viral source text and still need independent research before production.
+
 ## Project Structure
 
 ```
 somehow-true-pipeline/
 ├── app.py                  # FastAPI server (Railway entry point)
+├── import_cliplytics.py     # Cliplytics JSON → CONTENT.csv (CLX-* rows)
 ├── produce_video.py         # Unified pipeline: Runway + captions + assembly + QA
 ├── daily_pipeline.py        # Content selection + scene prompt generation
 ├── config.example.json      # Config template (FCT-011 Baarle)
 ├── CONTENT.csv              # 20-row content queue (5 with scripts)
+├── docs/
+│   └── CLIPLYTICS_BRIDGE.md  # Cliplytics import usage and schemas
 ├── requirements.txt         # Python dependencies
 ├── Dockerfile               # Railway/Docker build (ffmpeg + Python)
 ├── railway.toml             # Railway deployment config
