@@ -67,6 +67,12 @@ import numpy as np
 from scipy import signal
 from scipy.io import wavfile
 
+from providers.clip_coverage import (
+    COVERAGE_SLACK_SECONDS,
+    fill_clip_durations,
+    hold_prompt,
+    plan_scene_coverage,
+)
 from providers.env import load_env
 
 load_env()
@@ -157,10 +163,65 @@ def runway_headers():
     }
 
 
-def generate_runway_clips(config, work_dir):
+def scene_clip_paths(clips_dir):
+    return sorted(Path(clips_dir).glob("scene[0-9][0-9].mp4"))
+
+
+def clip_seconds(path):
+    data = ffprobe(path)
+    video = next(stream for stream in data["streams"] if stream["codec_type"] == "video")
+    frames = video.get("nb_frames")
+    if frames not in (None, "N/A"):
+        rate = video.get("avg_frame_rate") or video.get("r_frame_rate") or "24/1"
+        num, den = (rate.split("/", 1) + ["1"])[:2]
+        fps = float(num) / max(float(den), 1e-9)
+        return int(frames) / fps
+    return float(video.get("duration") or data["format"]["duration"])
+
+
+def clips_total_seconds(clips_dir):
+    return sum(clip_seconds(path) for path in scene_clip_paths(clips_dir))
+
+
+def persist_config(config_path, config):
+    write_json(config_path, config)
+
+
+def apply_narration_coverage(config, needed_seconds, config_path=None):
+    """Stretch scene lengths and append hold clips until they cover narration."""
+    prompts, durations = plan_scene_coverage(
+        config.get("scene_prompts") or [],
+        config.get("scene_durations") or [],
+        needed_seconds,
+    )
+    changed = (
+        prompts != list(config.get("scene_prompts") or [])
+        or durations != list(config.get("scene_durations") or [])
+    )
+    config["scene_prompts"] = prompts
+    config["scene_durations"] = durations
+    if changed and config_path is not None:
+        persist_config(config_path, config)
+    return changed
+
+
+def append_fill_clips(config, gap, config_path=None):
+    extras = fill_clip_durations(gap)
+    if not extras:
+        return []
+    last = (config.get("scene_prompts") or [""])[-1]
+    for duration in extras:
+        config.setdefault("scene_prompts", []).append(hold_prompt(last))
+        config.setdefault("scene_durations", []).append(duration)
+    if config_path is not None:
+        persist_config(config_path, config)
+    return extras
+
+
+def generate_runway_clips(config, work_dir, clips_dir=None):
     """Create all Runway clips in one batch, poll in one loop, download all at once."""
     import requests
-    clips_dir = work_dir / "clips"
+    clips_dir = Path(clips_dir) if clips_dir else work_dir / "clips"
     clips_dir.mkdir(exist_ok=True)
     prompts = config["scene_prompts"]
     durations = config["scene_durations"]
@@ -624,7 +685,7 @@ def assemble_video(clips_dir, narration_path, captions_ass, audio_path, output_p
     """Concatenate clips, upscale to 1080x1920, burn captions, mix audio."""
     qa_dir.mkdir(exist_ok=True)
 
-    clip_files = sorted(clips_dir.glob("scene*.mp4"))
+    clip_files = scene_clip_paths(clips_dir)
     if intro_clip_path and Path(intro_clip_path).exists():
         intro = Path(intro_clip_path)
         clip_files = [intro] + [c for c in clip_files if c.resolve() != intro.resolve()]
@@ -642,6 +703,12 @@ def assemble_video(clips_dir, narration_path, captions_ass, audio_path, output_p
 
     duration = total_frames / 24
     print(f"  Assembling {len(clip_files)} clips, {total_frames} frames, {duration:.2f}s")
+    audio_seconds = float(ffprobe(audio_path)["format"]["duration"])
+    if duration + COVERAGE_SLACK_SECONDS < audio_seconds:
+        raise RuntimeError(
+            f"Clips are {duration:.2f}s but audio is {audio_seconds:.2f}s; "
+            "visuals end before narration"
+        )
 
     # Build ffmpeg filter chain
     inputs = []
@@ -735,22 +802,53 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
     print(f"Title: {config.get('title', 'N/A')}")
     print(f"{'='*60}\n")
 
-    # Step 1: Runway generation
-    if not skip_runway:
-        print("STEP 1: Generating Runway clips (batch)...")
-        clip_results, clips_dir = generate_runway_clips(config, work_dir)
-        state["steps"].append({"step": "runway", "results": clip_results})
-        print()
-    else:
-        raw_clips = config.get("clips_dir")
-        clips_dir = ROOT / raw_clips if raw_clips else work_dir / "clips"
-        print(f"STEP 1: Using existing clips from {clips_dir}\n")
-
-    # Step 2: Caption generation
     narration_path = Path(config["narration_path"])
     if not narration_path.is_absolute():
         narration_path = ROOT / config["narration_path"]
+    narration_seconds = float(ffprobe(narration_path)["format"]["duration"])
+    print(f"Narration: {narration_seconds:.2f}s")
 
+    before_count = len(config.get("scene_durations") or [])
+    before_sum = sum(int(d) for d in (config.get("scene_durations") or []))
+    if apply_narration_coverage(config, narration_seconds, config_path):
+        extra = len(config["scene_durations"]) - before_count
+        note = f" including {extra} fill clip(s)" if extra else ""
+        print(
+            f"  Planned visuals {before_sum}s → {sum(config['scene_durations'])}s"
+            f"{note} to cover narration"
+        )
+
+    # Step 1: Runway generation
+    raw_clips = config.get("clips_dir")
+    clips_dir = ROOT / raw_clips if skip_runway and raw_clips else work_dir / "clips"
+    if not skip_runway:
+        print("STEP 1: Generating Runway clips (batch)...")
+        clip_results, clips_dir = generate_runway_clips(config, work_dir, clips_dir)
+        state["steps"].append({"step": "runway", "results": clip_results})
+        print()
+    else:
+        print(f"STEP 1: Using existing clips from {clips_dir}\n")
+
+    if not scene_clip_paths(clips_dir):
+        raise RuntimeError(f"No scene clips found in {clips_dir}")
+    visual_seconds = clips_total_seconds(clips_dir)
+    if visual_seconds + COVERAGE_SLACK_SECONDS < narration_seconds:
+        gap = narration_seconds - visual_seconds
+        extras = append_fill_clips(config, gap, config_path)
+        print(
+            f"  Clips are {visual_seconds:.2f}s, narration {narration_seconds:.2f}s. "
+            f"Generating {len(extras)} fill clip(s) {extras}..."
+        )
+        fill_results, clips_dir = generate_runway_clips(config, work_dir, clips_dir)
+        state["steps"].append({"step": "runway_fill", "results": fill_results, "durations": extras})
+        visual_seconds = clips_total_seconds(clips_dir)
+        if visual_seconds + COVERAGE_SLACK_SECONDS < narration_seconds:
+            raise RuntimeError(
+                f"Clips total {visual_seconds:.2f}s after fill, narration is {narration_seconds:.2f}s"
+            )
+    print(f"  Visuals {visual_seconds:.2f}s cover narration {narration_seconds:.2f}s\n")
+
+    # Step 2: Caption generation
     if not skip_captions:
         print("STEP 2: Generating captions (single Whisper pass)...")
         caption_dir = work_dir / "captions"
@@ -767,7 +865,7 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
     print("STEP 3: Preparing audio (narration + procedural music)...")
     audio_path, audio_qa = prepare_audio(
         narration_path,
-        duration=float(ffprobe(narration_path)["format"]["duration"]),
+        duration=max(narration_seconds, visual_seconds),
         work_dir=work_dir / "audio",
         qa_dir=work_dir / "qa",
     )
