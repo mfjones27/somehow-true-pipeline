@@ -22,6 +22,7 @@ from providers.env import load_env
 from providers.costs import print_summary
 from providers.elevenlabs_tts import spoken_script, synthesize
 from providers.openai_research import detect_format, hunt_viral_idea, research_topic, runway_prompts_for_script
+from providers.runway import HARD_BANS, STYLE_LOCK, lock_runway_config, prepare_prompt, weak_prompts
 from providers.youtube_upload import credentials_ready, youtube_title
 
 load_env()
@@ -204,18 +205,12 @@ def generate_scene_prompts(topic, script):
         visual = extract_visual_cue(segment)
         camera = CAMERA_MOVEMENTS[i % len(CAMERA_MOVEMENTS)]
 
-        prompt = (
-            f"Portrait 9:16 cinematic shot: {visual}. "
-            f"The scene should evoke: {segment[:120]}. "
-            f"{camera}. "
-            "Warm cinematic color grade, film grain, 35mm lens, shallow depth of field. "
-            "No text, logos, watermarks, or on-screen graphics. "
-            "Keep the lower third of the frame visually calm and uncluttered for caption overlay. "
-            "AI-generated illustration, not documentary footage."
+        prompt = prepare_prompt(
+            f"{STYLE_LOCK} {camera}. Subject and setting: {visual}. "
+            f"This shot illustrates this spoken beat: {segment[:400]}. "
+            "Hold the subject in the upper two-thirds. Slow physically plausible motion fills the clip. "
+            f"{HARD_BANS}"
         )
-
-        if len(prompt.encode("utf-16-le")) // 2 > 950:
-            prompt = prompt[:950]
         prompts.append(prompt)
 
     return prompts
@@ -237,8 +232,14 @@ def generate_config(content_row, narration_path=None, researched=None):
     researched = researched or load_research(cid)
 
     source_urls = researched.get("sources") or re.findall(r'https?://[^\s\)\]]+', core_fact)
-    scene_prompts = researched.get("scene_prompts") or generate_scene_prompts(topic, script)
+    scene_prompts = [prepare_prompt(p) for p in (researched.get("scene_prompts") or generate_scene_prompts(topic, script))]
     scene_durations = researched.get("scene_durations") or SCENE_DURATIONS[: len(scene_prompts)]
+    if weak_prompts(scene_prompts):
+        print("  Scene prompts are too thin; Astra rewriting them before Runway...")
+        polished = runway_prompts_for_script(script, topic, cid)
+        scene_prompts = polished["scene_prompts"]
+        if not researched.get("scene_durations"):
+            scene_durations = polished["scene_durations"]
 
     description = researched.get("description")
     if not description:
@@ -276,8 +277,8 @@ def generate_config(content_row, narration_path=None, researched=None):
         "brand": "SOMEHOW TRUE",
         "output_name": f"somehow-true-{cid.lower()}.mp4",
         "youtube_channel_id": "UCZqmUx29Va8Zud78Fj_0Geg",
-        "runway_model": "gen4.5",
-        "runway_ratio": "720:1280",
+        "runway_model": "seedance2_5",
+        "runway_ratio": "1080:1920",
         "caption_font": "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
         "caption_font_size": 66,
         "caption_style": {
@@ -290,7 +291,7 @@ def generate_config(content_row, narration_path=None, researched=None):
         },
     }
 
-    return config
+    return lock_runway_config(config)
 
 
 def run_daily(content_id=None, narration_path=None, skip_runway=False, skip_captions=False):

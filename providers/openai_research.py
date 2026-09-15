@@ -10,15 +10,34 @@ from openai import OpenAI
 
 from providers.costs import openai_usage
 from providers.env import load_env
+from providers.runway import (
+    HARD_BANS,
+    RUNWAY_MAX_DURATION,
+    RUNWAY_MIN_DURATION,
+    STYLE_LOCK,
+    prepare_prompt,
+    weak_prompts,
+)
 
 load_env()
 
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-6-astra")
 
-SCENE_PROMPT = (
-    "Portrait 9:16 cinematic AI illustration, no text, logos, watermarks, or real faces. "
-    "Keep the lower third visually calm for captions. Warm film grade, 35mm, shallow depth of field."
-)
+SCENE_PROMPT = f"""You are directing Seedance 2.5 text-to-video clips for a 9:16 YouTube Short.
+
+Each scene_prompt is one shot: a single dense paragraph, 800 to 2500 characters, that a camera can film without guessing.
+Write it like a DP shot card, not a vibe. Include ALL of:
+- Shot size and lens (e.g. 35mm medium close-up, macro, wide)
+- Camera move and speed that lasts the full duration (dolly, pan, crane, locked-off, push-in)
+- The exact subject, setting, era, materials, and weather for THIS narration beat
+- One continuous action with a beginning, middle, and end inside the clip
+- Lighting: source, direction, time of day, color, shadows
+- Composition: subject in the upper two-thirds; bottom third empty for captions
+- Style lock: {STYLE_LOCK}
+- Hard bans: {HARD_BANS}
+
+Map scene 1 to the hook sentence. Each later scene covers the next spoken beat. Invent specific visible details that illustrate the fact — do not quote the narration, do not write "evoking", do not write stock-footage language ("cinematic shot of a town").
+If you cannot see it on a monitor, rewrite it."""
 
 RESEARCH_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -116,10 +135,9 @@ core_fact is the sourced brief with URLs in parentheses.
 description is the YouTube description with a Sources section and this closer:
 Somehow True: facts that sound made up, checked before we tell them.
 Visuals are AI-generated illustrations. Narration is synthetic. Music is original computer-generated.
-scene_prompts are Runway Gen-4.5 text-to-video prompts, one per shot. Each prompt must include:
+scene_prompts are Seedance 2.5 text-to-video prompts, one per shot.
 {SCENE_PROMPT}
-Make each shot one unforgettable image that matches that narration beat. No stock-footage language.
-scene_durations are integers from 2 to 10 seconds and must match scene_prompts.
+scene_durations are integers from {RUNWAY_MIN_DURATION} to {RUNWAY_MAX_DURATION} seconds and must match scene_prompts.
 Return only the JSON object."""
 
 
@@ -141,8 +159,11 @@ def _parse_json(text: str) -> dict[str, Any]:
 def _normalize(data: dict[str, Any], scene_count: int, short: bool = False) -> dict[str, Any]:
     data["tags"] = [str(t) for t in data.get("tags", [])][:10]
     data["sources"] = [str(s) for s in data.get("sources", []) if str(s).startswith("http")][:8]
-    prompts = [str(p).strip()[:950] for p in data.get("scene_prompts", []) if str(p).strip()]
-    durations = [int(d) for d in data.get("scene_durations", []) if 2 <= int(d) <= 10]
+    prompts = [prepare_prompt(str(p)) for p in data.get("scene_prompts", []) if str(p).strip()]
+    durations = [
+        int(d) for d in data.get("scene_durations", [])
+        if RUNWAY_MIN_DURATION <= int(d) <= RUNWAY_MAX_DURATION
+    ]
     if len(prompts) < scene_count:
         raise RuntimeError(f"Astra returned {len(prompts)} scene prompts, need {scene_count}")
     data["scene_prompts"] = prompts[:scene_count]
@@ -287,7 +308,15 @@ def research_topic(topic: str, core_fact: str = "", *, short: bool = False, form
         },
     )
     openai_usage("research", response.usage, MODEL)
-    return _normalize(_parse_json(response.output_text), scene_count, short=short)
+    data = _normalize(_parse_json(response.output_text), scene_count, short=short)
+    data["scene_prompts"] = polish_scene_prompts(
+        data["scene_prompts"],
+        data["script"],
+        topic,
+        "research",
+        data["scene_durations"],
+    )
+    return data
 
 
 PROMPT_SCHEMA: dict[str, Any] = {
@@ -301,6 +330,75 @@ PROMPT_SCHEMA: dict[str, Any] = {
 }
 
 
+def polish_scene_prompts(
+    prompts: list[str],
+    script: str,
+    topic: str,
+    content_id: str,
+    durations: list[int] | None = None,
+) -> list[str]:
+    """Rewrite thin prompts with Astra. Does not call Runway."""
+    prompts = [prepare_prompt(p) for p in prompts]
+    flagged = weak_prompts(prompts)
+    if not flagged:
+        return prompts
+    print(f"  Astra rewriting {len(flagged)} thin Runway prompt(s) before generation")
+    rewritten = _rewrite_scene_prompts(prompts, script, topic, content_id, durations or [])
+    still = weak_prompts(rewritten)
+    if still:
+        details = "; ".join(f"scene {i + 1}: {', '.join(issues)}" for i, issues in still)
+        raise RuntimeError(
+            f"Runway prompts are still too thin after rewrite ({details}). "
+            "Not spending video credits on a bad prompt."
+        )
+    return rewritten
+
+
+def _rewrite_scene_prompts(
+    prompts: list[str],
+    script: str,
+    topic: str,
+    content_id: str,
+    durations: list[int],
+) -> list[str]:
+    issues = weak_prompts(prompts)
+    notes = "\n".join(
+        f"Scene {i + 1} problems: {', '.join(problem)}" for i, problem in issues
+    )
+    beats = "\n".join(
+        f"Scene {i + 1} ({(durations[i] if i < len(durations) else 8)}s) current prompt:\n{prompt}"
+        for i, prompt in enumerate(prompts)
+    )
+    client = _client()
+    response = client.responses.create(
+        model=MODEL,
+        instructions=(
+            "Rewrite these Seedance 2.5 text-to-video prompts. Keep the same scene count and order. "
+            f"{SCENE_PROMPT} Return only JSON."
+        ),
+        input=(
+            f"Topic: {topic}\nNarration:\n{script}\n\n{notes}\n\n{beats}\n"
+            "Rewrite every scene. Make each prompt specific enough to film."
+        ),
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "runway_prompts",
+                "strict": True,
+                "schema": PROMPT_SCHEMA,
+            }
+        },
+    )
+    openai_usage(content_id, response.usage, MODEL)
+    data = _parse_json(response.output_text)
+    rewritten = [prepare_prompt(str(p)) for p in data.get("scene_prompts", []) if str(p).strip()]
+    if len(rewritten) < len(prompts):
+        raise RuntimeError(
+            f"Astra rewrite returned {len(rewritten)} prompts, need {len(prompts)}"
+        )
+    return rewritten[: len(prompts)]
+
+
 def runway_prompts_for_script(script: str, topic: str = "", content_id: str = "research") -> dict[str, Any]:
     """Astra writes Runway prompts only. No web search. Script is already approved."""
     durations = [5, 8, 8, 8, 8, 8]
@@ -308,8 +406,8 @@ def runway_prompts_for_script(script: str, topic: str = "", content_id: str = "r
     response = client.responses.create(
         model=MODEL,
         instructions=(
-            "Write exactly 6 Runway Gen-4.5 text-to-video prompts that match this narration. "
-            f"{SCENE_PROMPT} No documentary stock-footage language. "
+            "Write exactly 6 Seedance 2.5 text-to-video prompts that match this narration. "
+            f"{SCENE_PROMPT} "
             "scene_durations must be 5,8,8,8,8,8."
         ),
         input=f"Topic: {topic}\nNarration:\n{script}\n",
@@ -324,10 +422,11 @@ def runway_prompts_for_script(script: str, topic: str = "", content_id: str = "r
     )
     openai_usage(content_id, response.usage, MODEL)
     data = _parse_json(response.output_text)
-    prompts = [str(p).strip()[:950] for p in data.get("scene_prompts", []) if str(p).strip()]
+    prompts = [prepare_prompt(str(p)) for p in data.get("scene_prompts", []) if str(p).strip()]
     if len(prompts) < 6:
         raise RuntimeError(f"Astra returned {len(prompts)} scene prompts, need 6")
+    prompts = polish_scene_prompts(prompts[:6], script, topic, content_id, durations)
     return {
-        "scene_prompts": prompts[:6],
+        "scene_prompts": prompts,
         "scene_durations": durations,
     }

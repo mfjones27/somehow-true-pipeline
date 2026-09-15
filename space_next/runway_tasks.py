@@ -33,10 +33,11 @@ def main():
     folder.mkdir(parents=True, exist_ok=True)
     if args.operation == "create":
         request = json.loads((folder / "request.json").read_text())
-        assert request["model"] == "gen4.5"
-        assert request["ratio"] == "720:1280"
-        assert 2 <= request["duration"] <= 10
-        assert len(request["promptText"].encode("utf-16-le")) // 2 <= 1000
+        assert request["model"] == "seedance2_5"
+        assert request["ratio"] == "1080:1920"
+        assert request.get("audio") is False
+        assert 4 <= request["duration"] <= 15
+        assert len(request["promptText"].encode("utf-16-le")) // 2 <= 15000
         marker = folder / "creation-attempt.json"
         if marker.exists():
             raise SystemExit("Creation already attempted; reconcile before any new request.")

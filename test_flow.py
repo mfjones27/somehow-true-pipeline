@@ -52,8 +52,8 @@ def main() -> int:
         "brand": "SOMEHOW TRUE",
         "output_name": "somehow-true-smoke.mp4",
         "youtube_channel_id": "UCZqmUx29Va8Zud78Fj_0Geg",
-        "runway_model": "gen4.5",
-        "runway_ratio": "720:1280",
+        "runway_model": "seedance2_5",
+        "runway_ratio": "1080:1920",
         "caption_font_size": 66,
         "caption_style": {
             "text_color": "&H00FFFFFF",

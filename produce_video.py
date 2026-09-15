@@ -29,8 +29,8 @@ Config format (see config.example.json):
   "youtube_channel_id": "UCZqmUx29Va8Zud78Fj_0Geg",
   "drive_folder_id": "...",
   "notion_page_id": "...",
-  "runway_model": "gen4.5",
-  "runway_ratio": "720:1280",
+  "runway_model": "seedance2_5",
+  "runway_ratio": "1080:1920",
   "caption_font": "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
   "caption_font_size": 72,
   "caption_style": {
@@ -74,6 +74,13 @@ from providers.clip_coverage import (
     plan_scene_coverage,
 )
 from providers.env import load_env
+from providers.runway import (
+    RUNWAY_MODEL,
+    RUNWAY_RATIO,
+    clip_file_issues,
+    lock_runway_config,
+    text_to_video_request,
+)
 
 load_env()
 
@@ -280,11 +287,11 @@ def generate_runway_clips(config, work_dir, clips_dir=None):
     import requests
     clips_dir = Path(clips_dir) if clips_dir else work_dir / "clips"
     clips_dir.mkdir(exist_ok=True)
+    lock_runway_config(config)
     prompts = config["scene_prompts"]
     durations = config["scene_durations"]
-    model = config.get("runway_model", "gen4.5")
-    ratio = config.get("runway_ratio", "720:1280")
     headers = runway_headers()
+    print(f"  Locked Runway model {RUNWAY_MODEL} @ {RUNWAY_RATIO} (audio off)")
 
     results = []
 
@@ -292,16 +299,17 @@ def generate_runway_clips(config, work_dir, clips_dir=None):
     for i, (prompt, dur) in enumerate(zip(prompts, durations), 1):
         clip_path = clips_dir / f"scene{i:02d}.mp4"
         if clip_path.exists():
+            _assert_clip_usable(clip_path, None, require_1080=False)
             results.append({"scene": i, "status": "already_exists", "path": str(clip_path)})
             continue
 
-        request = {"model": model, "duration": dur, "ratio": ratio, "promptText": prompt}
+        request = text_to_video_request(prompt, dur)
         marker = clips_dir / f"scene{i:02d}_creation.json"
         if marker.exists():
             creation = json.loads(marker.read_text())
             task_id = creation.get("task_id")
             if task_id:
-                results.append({"scene": i, "status": "polling", "task_id": task_id})
+                results.append({"scene": i, "status": "polling", "task_id": task_id, "duration": request["duration"]})
                 continue
 
         resp = None
@@ -319,8 +327,11 @@ def generate_runway_clips(config, work_dir, clips_dir=None):
         estimated = data.get("estimatedCost")
         write_json(marker, {"task_id": task_id, "request": request, "estimated_cost": estimated})
         from providers.costs import runway_clip
-        cost = runway_clip(config.get("content_id", "unknown"), model, int(dur), estimated)
-        results.append({"scene": i, "status": "created", "task_id": task_id, "credits": cost["credits"]})
+        cost = runway_clip(config.get("content_id", "unknown"), RUNWAY_MODEL, int(request["duration"]), estimated)
+        results.append({
+            "scene": i, "status": "created", "task_id": task_id,
+            "credits": cost["credits"], "duration": request["duration"],
+        })
         print(f"  Scene {i}: created task {task_id} (~{cost['credits']} credits / ${cost['usd']:.2f})")
 
     # Phase 2: Poll all pending tasks in a single loop
@@ -334,6 +345,7 @@ def generate_runway_clips(config, work_dir, clips_dir=None):
                 task_id = item["task_id"]
                 clip_path = clips_dir / f"scene{scene:02d}.mp4"
                 if clip_path.exists():
+                    _assert_clip_usable(clip_path, item.get("duration") or durations[scene - 1])
                     item["status"] = "downloaded"
                     item["path"] = str(clip_path)
                     continue
@@ -374,12 +386,14 @@ def generate_runway_clips(config, work_dir, clips_dir=None):
                         "sha256": hashlib.sha256(resp2.content).hexdigest(),
                     }
                     write_json(clips_dir / f"scene{scene:02d}_receipt.json", receipt)
+                    _assert_clip_usable(clip_path, item.get("duration") or durations[scene - 1])
                     item["status"] = "downloaded"
                     item["path"] = str(clip_path)
                     print(f"  Scene {scene}: downloaded ({clip_path.stat().st_size:,} bytes)")
                 elif status_data["status"] in ("FAILED", "CANCELED", "CANCELLED"):
                     item["status"] = "failed"
-                    print(f"  Scene {scene}: FAILED")
+                    item["failure"] = status_data.get("failure") or status_data.get("error")
+                    print(f"  Scene {scene}: FAILED {item.get('failure') or ''}".rstrip())
                 else:
                     still_pending.append(item)
 
@@ -390,7 +404,43 @@ def generate_runway_clips(config, work_dir, clips_dir=None):
                 time.sleep(30)
                 print(f"  Polling round {round_num}: {len(pending)} clips pending...")
 
+    failed = [r for r in results if r["status"] == "failed"]
+    if failed:
+        scenes = ", ".join(str(r["scene"]) for r in failed)
+        raise RuntimeError(
+            f"Runway failed for scene(s) {scenes}; not assembling a broken video"
+        )
+    if pending:
+        scenes = ", ".join(str(r["scene"]) for r in pending)
+        raise RuntimeError(f"Runway still pending for scene(s) {scenes} after polling")
     return results, clips_dir
+
+
+def _black_seconds(path):
+    result = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-i", str(path),
+            "-vf", "blackdetect=d=0.3:pic_th=0.96", "-an", "-f", "null", "-",
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120,
+        **_subprocess_kwargs(),
+    )
+    return sum(float(m.group(1)) for m in re.finditer(r"black_duration:(\d+(?:\.\d+)?)", result.stderr or ""))
+
+
+def _assert_clip_usable(path, expected_seconds, *, require_1080=True):
+    path = Path(path)
+    probe = ffprobe(path)
+    issues = clip_file_issues(path, probe, expected_seconds, require_1080=require_1080)
+    try:
+        duration = float((probe.get("format") or {}).get("duration") or 0)
+        black = _black_seconds(path)
+        if duration and black > duration * 0.6:
+            issues.append(f"mostly black ({black:.1f}s of {duration:.1f}s)")
+    except Exception:
+        pass
+    if issues:
+        raise RuntimeError(f"{path.name} is not a usable clip: {'; '.join(issues)}")
 
 
 # ─── Step 2: Caption Generation (single Whisper pass) ────────────────────────
@@ -754,8 +804,8 @@ def assemble_video(clips_dir, narration_path, captions_ass, audio_path, output_p
     for cf in clip_files:
         data = ffprobe(cf)
         v = next(s for s in data["streams"] if s["codec_type"] == "video")
-        if (v["width"], v["height"]) != (720, 1280):
-            print(f"  WARNING: {cf.name} is {v['width']}x{v['height']}, expected 720x1280")
+        if (v["width"], v["height"]) not in ((1080, 1920), (720, 1280)):
+            print(f"  WARNING: {cf.name} is {v['width']}x{v['height']}, expected 1080x1920")
         total_frames += int(v.get("nb_frames", round(float(v["duration"]) * 24)))
 
     duration = total_frames / 24
@@ -864,6 +914,8 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
         narration_path = ROOT / config["narration_path"]
     narration_seconds = float(ffprobe(narration_path)["format"]["duration"])
     print(f"Narration: {narration_seconds:.2f}s")
+    lock_runway_config(config)
+    persist_config(config_path, config)
 
     before_count = len(config.get("scene_durations") or [])
     before_sum = sum(int(d) for d in (config.get("scene_durations") or []))

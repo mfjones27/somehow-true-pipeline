@@ -9,7 +9,13 @@ from providers.env import ROOT
 
 LEDGER = ROOT / "pipeline_output" / "costs.jsonl"
 
-RUNWAY_CREDITS_PER_SEC = {"gen4.5": 12, "gen4_turbo": 5}
+RUNWAY_CREDITS_PER_SEC = {
+    "gen4.5": 12,
+    "gen4_turbo": 5,
+    "seedance2_5": 68,
+    "seedance2": 36,
+}
+RUNWAY_MIN_CREDITS = {"seedance2_5": 80}
 USD_PER_RUNWAY_CREDIT = 0.01
 OPENAI_USD_PER_M = {"input": 10.0, "output": 50.0}
 ELEVENLABS_USD_PER_1K = 0.30
@@ -55,8 +61,8 @@ def elevenlabs_usage(content_id: str, chars: int, model: str) -> dict:
 
 
 def _credits_from_estimate(estimated_cost, seconds: int, model: str) -> float:
-    rate = RUNWAY_CREDITS_PER_SEC.get(model, 12)
-    fallback = seconds * rate
+    rate = RUNWAY_CREDITS_PER_SEC.get(model, 68)
+    fallback = max(RUNWAY_MIN_CREDITS.get(model, 0), seconds * rate)
     if estimated_cost is None:
         return fallback
     if isinstance(estimated_cost, (int, float, str)):
