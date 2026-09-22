@@ -1,0 +1,38 @@
+{
+  "slug": "compound-interest-trap",
+  "source_reference": {
+    "id": "tt-7123456789012345678",
+    "url": "https://www.tiktok.com/@moneymentor/video/7123456789012345678",
+    "author": "moneymentor",
+    "views": 2400000,
+    "likes": 180000
+  },
+  "script": {
+    "topic": "Why most people never actually see compound interest",
+    "hook": {
+      "text": "Everyone quotes compound interest. Almost nobody lasts long enough for it to matter.",
+      "broll_query": "close-up of a growing stack of coins on a wooden desk"
+    },
+    "beats": [
+      {
+        "text": "The viral clip says a small monthly transfer becomes a fortune if you never interrupt it.",
+        "broll_query": "calendar pages flipping beside a savings jar"
+      },
+      {
+        "text": "Cliplytics only captured the creator's claim — not a verified return or time horizon.",
+        "broll_query": "person pausing a phone video mid-scroll"
+      }
+    ],
+    "cta": {
+      "text": "Treat the numbers as a prompt to check, not as a fact.",
+      "broll_query": "notebook with a question mark next to a calculator"
+    },
+    "tiktok_caption": "Compound interest only works if you actually stay invested. #finance #money",
+    "hashtags": ["finance", "money", "compoundinterest"]
+  },
+  "voiceover": {
+    "voice": "alloy",
+    "duration_s": 28.5
+  },
+  "created_at": "2026-09-14T12:00:00Z"
+}

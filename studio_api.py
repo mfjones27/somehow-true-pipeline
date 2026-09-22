@@ -27,6 +27,11 @@ class ProduceIdRequest(BaseModel):
     skip_captions: bool = False
 
 
+class CliplyticsRequest(BaseModel):
+    produce: bool = True
+    cliplytics_dir: str = ""
+
+
 class LinkRequest(BaseModel):
     url: str = ""
     text: str = ""
@@ -57,6 +62,7 @@ def api_health():
 @router.get("/dashboard")
 def dashboard():
     from daily_pipeline import list_local_projects, queue_snapshot
+    from providers.cliplytics_bridge import cliplytics_status, resolve_cliplytics_dir
 
     queue = queue_snapshot()
     return {
@@ -68,6 +74,7 @@ def dashboard():
         "youtube_ready": credentials_ready(),
         "credits_per_video": 540,
         "usd_per_video": 5.40,
+        "cliplytics": cliplytics_status(resolve_cliplytics_dir(), ROOT / "CONTENT.csv"),
     }
 
 
@@ -132,6 +139,46 @@ def api_produce(req: ProduceIdRequest):
     label = f"Continue {cid}" if req.skip_runway else f"Produce {cid}"
     job = start_job(label, args, extra={"kind": "produce", "content_id": cid})
     return {"job": job}
+
+
+def _cliplytics_root(requested: str = ""):
+    from providers.cliplytics_bridge import resolve_cliplytics_dir
+
+    if requested.strip() and _desktop():
+        return resolve_cliplytics_dir(requested.strip())
+    return resolve_cliplytics_dir()
+
+
+@router.get("/cliplytics")
+def api_cliplytics_status():
+    from providers.cliplytics_bridge import cliplytics_status
+
+    return cliplytics_status(_cliplytics_root(), ROOT / "CONTENT.csv")
+
+
+@router.post("/cliplytics")
+def api_cliplytics(req: CliplyticsRequest):
+    from providers.cliplytics_bridge import import_next_topic
+
+    try:
+        result = import_next_topic(
+            _cliplytics_root(req.cliplytics_dir),
+            ROOT / "CONTENT.csv",
+            research=req.produce,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not result.imported:
+        raise HTTPException(400, "No unused Cliplytics topics to import")
+    row = result.imported[0]
+    if not req.produce:
+        return {"queued": row, "produced": False, "job": None}
+    args = [str(ROOT / "daily_pipeline.py"), "--content", row["id"]]
+    title = f"Cliplytics {row['id']}: {(row.get('hook') or row.get('topic') or '')[:48]}"
+    job = start_job(title, args, extra={"kind": "cliplytics", "content_id": row["id"]})
+    return {"queued": row, "produced": True, "job": job}
 
 
 def _copy_text(text: str) -> None:
