@@ -22,6 +22,7 @@ from providers.env import load_env
 from providers.costs import print_summary
 from providers.elevenlabs_tts import spoken_script, synthesize
 from providers.openai_research import detect_format, hunt_viral_idea, research_topic, runway_prompts_for_script
+from providers.captions import lock_caption_style
 from providers.runway import HARD_BANS, STYLE_LOCK, lock_runway_config, prepare_prompt, weak_prompts
 from providers.youtube_upload import credentials_ready, youtube_title
 
@@ -283,15 +284,15 @@ def generate_config(content_row, narration_path=None, researched=None):
         "caption_font_size": 66,
         "caption_style": {
             "text_color": "&H00FFFFFF",
-            "active_word_color": "&H87E2C5&",
+            "active_word_color": "&H87E2C5",
             "outline_color": "&H0018100D",
-            "pos_x": 485,
+            "pos_x": 540,
             "pos_y": 1400,
-            "max_width_px": 780,
+            "max_width_px": 900,
         },
     }
 
-    return lock_runway_config(config)
+    return lock_caption_style(lock_runway_config(config))
 
 
 def run_daily(content_id=None, narration_path=None, skip_runway=False, skip_captions=False):

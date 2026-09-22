@@ -32,14 +32,14 @@ Config format (see config.example.json):
   "runway_model": "seedance2_5",
   "runway_ratio": "1080:1920",
   "caption_font": "/usr/share/fonts/truetype/lato/Lato-Bold.ttf",
-  "caption_font_size": 72,
+  "caption_font_size": 66,
   "caption_style": {
     "text_color": "&H00FFFFFF",
-    "active_word_color": "&H87E2C5&",
+    "active_word_color": "&H87E2C5",
     "outline_color": "&H0018100D",
-    "pos_x": 485,
+    "pos_x": 540,
     "pos_y": 1400,
-    "max_width_px": 780
+    "max_width_px": 900
   }
 }
 
@@ -80,6 +80,14 @@ from providers.runway import (
     clip_file_issues,
     lock_runway_config,
     text_to_video_request,
+)
+from providers.captions import (
+    CAPTION_MAX_WIDTH,
+    CAPTION_POS_X,
+    CAPTION_POS_Y,
+    fit_caption_phrases,
+    lock_caption_style,
+    scale_font_to_fit,
 )
 
 load_env()
@@ -449,7 +457,8 @@ def generate_captions(config, narration_path, output_dir):
     """Single Whisper pass → ASS + SRT. No dual-model cross-validation, no QA frames.
 
     Uses faster-whisper small.en (462MB) for word-level timestamps.
-    Groups words into 2-4 word phrases based on punctuation and natural pauses.
+    Groups words into short phrases based on punctuation and natural pauses.
+    Each on-screen line is measured so it cannot run off the 9:16 frame.
     """
     try:
         from faster_whisper import WhisperModel
@@ -487,16 +496,15 @@ def generate_captions(config, narration_path, output_dir):
     # Group into 2-4 word phrases based on punctuation and natural breaks
     script_text = config.get("script", "")
     phrase_texts = _group_phrases(script_text, words)
-
-    # Generate ASS with word-highlight captions
-    style = config.get("caption_style", {})
-    pos_x = style.get("pos_x", 485)
-    pos_y = style.get("pos_y", 1400)
-    max_width = style.get("max_width_px", 780)
+    lock_caption_style(config)
+    style = config["caption_style"]
+    pos_x = CAPTION_POS_X
+    pos_y = style.get("pos_y", CAPTION_POS_Y)
+    max_width = CAPTION_MAX_WIDTH
     font_size = config.get("caption_font_size", 66)
     text_color = style.get("text_color", "&H00FFFFFF")
-    active_color = style.get("active_word_color", "&H87E2C5&")
-    outline_color = style.get("outline_color", "&H0018100D")
+    active_color = style.get("active_word_color", "&H87E2C5")
+    phrase_texts = fit_caption_phrases(phrase_texts, FONT, font_size, max_width)
 
     # Map phrase words to ASR words
     phrases = []
@@ -552,7 +560,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for w in selected:
                 color = active_color if w["start"] <= mid < w["end"] else text_color
                 parts.append(r"{\1c" + color + "}" + w["text"])
-            text = rf"{{\an5\pos({pos_x},{pos_y})\q2}}" + " ".join(parts)
+            line = " ".join(w["text"] for w in selected)
+            fitted_size = scale_font_to_fit(line, FONT, font_size, max_width)
+            text = rf"{{\an5\pos({pos_x},{pos_y})\q2\fs{fitted_size}}}" + " ".join(parts)
             events.append(f"Dialogue: 0,{ass_time(start)},{ass_time(end)},Caption,,0,0,0,,{text}")
 
     ass_path = output_dir / "captions.ass"
@@ -575,37 +585,30 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def _group_phrases(script_text, words):
-    """Group words into 2-4 word phrases. Tries to match script punctuation."""
+    """Group words into short phrases. Tries to match script punctuation."""
     if script_text:
         # Split script by natural phrase boundaries
         raw_phrases = re.split(r'(?<=[.,;:!?])\s+', script_text.strip())
         phrases = []
         for rp in raw_phrases:
             word_count = len(rp.split())
-            if word_count <= 4:
+            if word_count <= 3:
                 phrases.append(rp)
             else:
                 # Split long phrases into 3-word chunks
                 parts = rp.split()
                 for j in range(0, len(parts), 3):
-                    chunk = parts[j:j+3]
-                    if len(chunk) >= 2:
+                    chunk = parts[j:j + 3]
+                    if chunk:
                         phrases.append(" ".join(chunk))
-                    elif chunk:
-                        if phrases:
-                            phrases[-1] += " " + " ".join(chunk)
-                        else:
-                            phrases.append(" ".join(chunk))
         return phrases
     else:
         # Fallback: group ASR words into 3-word phrases
         phrases = []
         for i in range(0, len(words), 3):
-            chunk = words[i:i+3]
-            if len(chunk) >= 2:
+            chunk = words[i:i + 3]
+            if chunk:
                 phrases.append(" ".join(w["text"] for w in chunk))
-            elif chunk and phrases:
-                phrases[-1] += " " + " ".join(w["text"] for w in chunk)
         return phrases
 
 
@@ -915,6 +918,7 @@ def run_pipeline(config_path, skip_runway=False, skip_captions=False, upload=Fal
     narration_seconds = float(ffprobe(narration_path)["format"]["duration"])
     print(f"Narration: {narration_seconds:.2f}s")
     lock_runway_config(config)
+    lock_caption_style(config)
     persist_config(config_path, config)
 
     before_count = len(config.get("scene_durations") or [])

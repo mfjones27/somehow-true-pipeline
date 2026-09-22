@@ -57,11 +57,11 @@ def main() -> int:
         "caption_font_size": 66,
         "caption_style": {
             "text_color": "&H00FFFFFF",
-            "active_word_color": "&H87E2C5&",
+            "active_word_color": "&H87E2C5",
             "outline_color": "&H0018100D",
-            "pos_x": 485,
+            "pos_x": 540,
             "pos_y": 1400,
-            "max_width_px": 780,
+            "max_width_px": 900,
         },
     }
     config_path = WORK / "config.json"
