@@ -12,6 +12,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from providers.costs import print_summary
 from providers.elevenlabs_tts import spoken_script, synthesize
 from providers.openai_research import detect_format, hunt_viral_idea, research_topic, runway_prompts_for_script
 from providers.captions import lock_caption_style
+from providers.failures import extract_failure
 from providers.runway import HARD_BANS, STYLE_LOCK, lock_runway_config, prepare_prompt, weak_prompts
 from providers.youtube_upload import credentials_ready, youtube_title
 
@@ -381,9 +383,27 @@ def run_daily(content_id=None, narration_path=None, skip_runway=False, skip_capt
     if should_upload:
         cmd.append("--upload")
     print(f"Command: {' '.join(cmd)}")
-    result = subprocess.run(cmd)
-    if result.returncode:
-        print(f"Pipeline FAILED for {cid}")
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    captured: list[str] = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        captured.append(line)
+        print(line, end="", flush=True)
+    code = proc.wait()
+    if code:
+        reason = extract_failure("".join(captured))
+        print(f"ERROR: {reason}", flush=True)
+        print(f"Pipeline FAILED for {cid}: {reason}", flush=True)
         log = load_produced_log()
         log.setdefault("failed", []).append(cid)
         save_produced_log(log)

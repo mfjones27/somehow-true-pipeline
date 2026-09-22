@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from job_runner import list_jobs, snapshot, start_job
+from providers.balances import fetch_balances
 from providers.costs import summarize
 from providers.env import ROOT
 from providers.youtube_upload import credentials_ready, list_posted_videos
@@ -64,6 +65,7 @@ def dashboard():
         "projects": list_local_projects()[:24],
         "videos": list_posted_videos()[:24],
         "spend": summarize(),
+        "balances": fetch_balances(),
         "jobs": list_jobs()[:12],
         "youtube_ready": credentials_ready(),
         "credits_per_video": 540,

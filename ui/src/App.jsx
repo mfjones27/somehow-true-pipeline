@@ -241,6 +241,7 @@ export default function App() {
         </nav>
         <div className="chrome-meta">
           {running.length ? <span className="live">{running.length} running</span> : <span className="idle">Idle</span>}
+          <BalanceStrip providers={dash?.balances?.providers} />
           <p>{dash?.youtube_ready ? "YouTube ready" : "YouTube not signed in"}</p>
         </div>
       </header>
@@ -255,6 +256,9 @@ export default function App() {
         </header>
 
         {error ? <p className="banner">{error}</p> : null}
+        {dash?.balances?.warnings?.length ? (
+          <p className="banner">{dash.balances.warnings.join(" ")}</p>
+        ) : null}
 
         {page === "idea" && (
           <section className="hero">
@@ -379,6 +383,9 @@ export default function App() {
                   onOpen={openUrl}
                 />
               )}
+              {job?.status === "failed" && job?.error ? (
+                <p className="banner log-error">{job.error}</p>
+              ) : null}
               <pre>{job?.log || "Pick a job."}</pre>
             </div>
           </section>
@@ -394,9 +401,22 @@ export default function App() {
 
         {page === "spend" && dash && (
           <section className="panel">
+            <h3>Remaining</h3>
+            <ul className="spend">
+              {(dash.balances?.providers || []).map((row) => (
+                <li key={row.id}>
+                  <strong className={row.low ? "low-label" : ""}>{row.label}</strong>
+                  <span>
+                    {row.display}
+                    {row.low ? " · low" : ""}
+                    {row.hint ? ` · ${row.hint}` : ""}
+                  </span>
+                </li>
+              ))}
+            </ul>
             <h3>API spend</h3>
             <p className="lede">
-              Total ${(dash.spend.usd || 0).toFixed(4)} · {dash.spend.runway_credits} Runway credits
+              Total ${(dash.spend.usd || 0).toFixed(4)} · {dash.spend.runway_credits} Runway credits used
             </p>
             <ul className="spend">
               {Object.entries(dash.spend.by_provider || {}).map(([name, val]) => (
@@ -438,6 +458,19 @@ export default function App() {
         </div>
       ) : null}
     </div>
+  );
+}
+
+function BalanceStrip({ providers }) {
+  if (!providers?.length) return null;
+  return (
+    <p className="balance-strip">
+      {providers.map((row) => (
+        <span key={row.id} className={row.low ? "low" : ""}>
+          {row.label} {row.display}
+        </span>
+      ))}
+    </p>
   );
 }
 

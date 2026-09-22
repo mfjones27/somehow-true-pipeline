@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path
 
 from providers.env import ROOT
+from providers.failures import extract_failure
 from providers.youtube_upload import extract_youtube_url, youtube_links
 
 JOBS: dict[str, dict] = {}
@@ -66,17 +67,22 @@ def _run(job_id: str, args: list[str]) -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
             lines.append(line)
-            JOBS[job_id]["log"] = "".join(lines[-300:])
+            JOBS[job_id]["log"] = "".join(lines[-400:])
         code = proc.wait()
         JOBS[job_id]["status"] = "completed" if code == 0 else "failed"
-        tail = JOBS[job_id]["log"][-2500:]
+        log = JOBS[job_id]["log"]
         if code == 0:
-            JOBS[job_id]["result"] = tail
+            JOBS[job_id]["result"] = log[-2500:]
         else:
-            JOBS[job_id]["error"] = tail
+            reason = extract_failure(log)
+            JOBS[job_id]["error"] = reason
+            JOBS[job_id]["log"] = f"FAILED: {reason}\n\n{log}"
     except Exception as exc:
         JOBS[job_id]["status"] = "failed"
-        JOBS[job_id]["error"] = str(exc)
+        reason = f"{type(exc).__name__}: {exc}"
+        JOBS[job_id]["error"] = reason
+        existing = JOBS[job_id].get("log") or ""
+        JOBS[job_id]["log"] = f"FAILED: {reason}\n\n{existing}"
 
 
 def snapshot(job_id: str) -> dict | None:
